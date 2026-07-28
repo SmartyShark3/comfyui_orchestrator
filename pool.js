@@ -29,6 +29,47 @@ export class ComfyServerPool extends EventEmitter {
     }
   }
 
+  // Encapsulated API queries & controls
+  isServerAvailable(serverUrl) {
+    const state = this.serverStates.get(serverUrl);
+    return Boolean(state && state.status === 'connected' && !state.activeJob);
+  }
+
+  getServerState(serverUrl) {
+    const state = this.serverStates.get(serverUrl);
+    if (!state) return null;
+    return {
+      status: state.status,
+      activeJob: state.activeJob ? { ...state.activeJob } : null,
+      cpuTemp: state.cpuTemp,
+      gpuTemp: state.gpuTemp
+    };
+  }
+
+  getHealthList() {
+    return this.servers.map(url => {
+      const state = this.getOrCreateServerState(url);
+      return {
+        url,
+        status: state.status,
+        activeJob: state.activeJob ? (state.activeJob.nodeId || state.activeJob.rootId || state.activeJob.id) : null,
+        cpuTemp: state.cpuTemp,
+        gpuTemp: state.gpuTemp
+      };
+    });
+  }
+
+  async interruptJobs(predicateFn) {
+    let interrupted = false;
+    for (const [serverUrl, state] of this.serverStates.entries()) {
+      if (state.activeJob && predicateFn(state.activeJob)) {
+        await this.cancel(serverUrl, state.activeJob.id);
+        interrupted = true;
+      }
+    }
+    return interrupted;
+  }
+
   // Overridable API methods
   prepareWorkflow(workflowTemplate, prompt, seed, inputImageName, negativePrompt) {
     return prepareWorkflowJson(workflowTemplate, prompt, seed, inputImageName, negativePrompt);
@@ -164,18 +205,7 @@ export class ComfyServerPool extends EventEmitter {
       if (!this.servers) return;
 
       await Promise.all(this.servers.map(url => this.pollServerTelemetry(url)));
-
-      const healthList = this.servers.map(url => {
-        const state = this.getOrCreateServerState(url);
-        return {
-          url,
-          status: state.status,
-          activeJob: state.activeJob ? (state.activeJob.nodeId || state.activeJob.rootId || state.activeJob.id) : null,
-          cpuTemp: state.cpuTemp,
-          gpuTemp: state.gpuTemp
-        };
-      });
-
+      const healthList = this.getHealthList();
       this.emit('telemetry', healthList);
     };
 

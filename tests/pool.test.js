@@ -61,6 +61,69 @@ describe('ComfyServerPool', () => {
       expect(pool.serverStates.get('http://gpu1:8188').status).toBe('offline');
       pool.stop();
     });
+
+    it('should correctly report isServerAvailable', async () => {
+      const { pool } = createTestPool({ servers: ['http://gpu1:8188'] });
+      expect(pool.isServerAvailable('http://gpu1:8188')).toBe(false); // offline
+
+      pool.getClient('http://gpu1:8188');
+      await vi.advanceTimersByTimeAsync(1); // connected
+
+      expect(pool.isServerAvailable('http://gpu1:8188')).toBe(true);
+
+      pool.getOrCreateServerState('http://gpu1:8188').activeJob = { id: 'busy-job' };
+      expect(pool.isServerAvailable('http://gpu1:8188')).toBe(false);
+
+      pool.stop();
+    });
+
+    it('should return server state snapshot via getServerState', async () => {
+      const { pool } = createTestPool({ servers: ['http://gpu1:8188'] });
+      expect(pool.getServerState('http://unknown:8188')).toBeNull();
+
+      pool.getClient('http://gpu1:8188');
+      await vi.advanceTimersByTimeAsync(1);
+
+      const state = pool.getServerState('http://gpu1:8188');
+      expect(state).toEqual({
+        status: 'connected',
+        activeJob: null,
+        cpuTemp: null,
+        gpuTemp: null
+      });
+
+      pool.stop();
+    });
+
+    it('should return health list for all configured servers via getHealthList', async () => {
+      const { pool } = createTestPool({ servers: ['http://gpu1:8188', 'http://gpu2:8188'] });
+      pool.getClient('http://gpu1:8188');
+      await vi.advanceTimersByTimeAsync(1);
+
+      const healthList = pool.getHealthList();
+      expect(healthList).toEqual([
+        { url: 'http://gpu1:8188', status: 'connected', activeJob: null, cpuTemp: null, gpuTemp: null },
+        { url: 'http://gpu2:8188', status: 'offline', activeJob: null, cpuTemp: null, gpuTemp: null }
+      ]);
+
+      pool.stop();
+    });
+
+    it('should interrupt active jobs matching predicate via interruptJobs', async () => {
+      const { pool, mocks } = createTestPool({ servers: ['http://gpu1:8188', 'http://gpu2:8188'] });
+      pool.getClient('http://gpu1:8188');
+      pool.getClient('http://gpu2:8188');
+      await vi.advanceTimersByTimeAsync(1);
+
+      pool.getOrCreateServerState('http://gpu1:8188').activeJob = { id: 'job-ws1-n1', workspaceId: 'ws1', nodeId: 'n1' };
+      pool.getOrCreateServerState('http://gpu2:8188').activeJob = { id: 'job-ws2-n2', workspaceId: 'ws2', nodeId: 'n2' };
+
+      const interrupted = await pool.interruptJobs(j => j.workspaceId === 'ws1');
+      expect(interrupted).toBe(true);
+      expect(mocks.interrupt).toHaveBeenCalledWith('http://gpu1:8188');
+
+      pool.stop();
+    });
   });
 
   describe('Dispatch Lifecycle', () => {
