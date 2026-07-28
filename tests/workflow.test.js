@@ -174,4 +174,74 @@ describe('Workflow JSON preparation', () => {
     expect(workflow["10"].inputs.text).toBe("original_neg, suffix_neg");
     expect(workflow["20"].inputs.text).toBe("suffix_neg");
   });
+
+  it('should handle nodes with no inputs object without throwing', () => {
+    const mockWorkflow = {
+      "10": {
+        "_meta": { "title": "APP_PROMPT" }
+      },
+      "20": {
+        "_meta": { "title": "APP_NEGATIVE_PROMPT" }
+      }
+    };
+
+    expect(() => prepareWorkflowJson(mockWorkflow, "prompt", 123, "img.png", "suffix")).not.toThrow();
+  });
+
+  it('should not mutate the original workflow object', () => {
+    const mockWorkflow = {
+      "10": {
+        "inputs": { "text": "original" },
+        "_meta": { "title": "APP_PROMPT" }
+      }
+    };
+
+    const originalJsonStr = JSON.stringify(mockWorkflow);
+    prepareWorkflowJson(mockWorkflow, "new prompt", 123, "img.png");
+    expect(JSON.stringify(mockWorkflow)).toBe(originalJsonStr);
+  });
+
+  it('should handle non-string currentText gracefully when appending negative prompt', () => {
+    const mockWorkflow = {
+      "10": {
+        "inputs": {
+          "text": 12345
+        },
+        "_meta": { "title": "APP_NEGATIVE_PROMPT" }
+      }
+    };
+
+    const { workflow } = prepareWorkflowJson(mockWorkflow, "", 0, "", "suffix_neg");
+    expect(workflow["10"].inputs.text).toBe("suffix_neg");
+  });
+
+  it('should treat empty or whitespace-only negative prompt suffix as no-op', () => {
+    const mockWorkflow = {
+      "10": {
+        "inputs": {
+          "text": "original_neg"
+        },
+        "_meta": { "title": "APP_NEGATIVE_PROMPT" }
+      }
+    };
+
+    const { workflow: wf1 } = prepareWorkflowJson(mockWorkflow, "", 0, "", "");
+    expect(wf1["10"].inputs.text).toBe("original_neg");
+
+    const { workflow: wf2 } = prepareWorkflowJson(mockWorkflow, "", 0, "", "   ");
+    expect(wf2["10"].inputs.text).toBe("original_neg");
+  });
+
+  it('should create text key fallback when node has inputs but neither text nor value', () => {
+    const mockWorkflow = {
+      "10": {
+        "inputs": {},
+        "_meta": { "title": "APP_NEGATIVE_PROMPT" }
+      }
+    };
+
+    const { workflow } = prepareWorkflowJson(mockWorkflow, "", 0, "", "suffix_neg");
+    expect(workflow["10"].inputs.text).toBe("suffix_neg");
+  });
 });
+
