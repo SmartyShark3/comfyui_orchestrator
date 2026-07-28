@@ -1,10 +1,10 @@
 # comfyui-orchestrator
 
-> **The ultimate ComfyUI API client, Node.js SDK, and multi-GPU server pool orchestrator for Stable Diffusion & AI video generation pipelines.**
+> **A Node.js API client, SDK, and multi-server pool orchestrator for ComfyUI, Stable Diffusion, and AI video generation pipelines.**
 
-`comfyui-orchestrator` is a lightweight, framework-agnostic Node.js library designed for scalable ComfyUI workflow automation, multi-server load balancing, and real-time WebSocket execution tracking.
+`comfyui-orchestrator` is a lightweight, framework-agnostic Node.js library for ComfyUI workflow automation, multi-server load balancing, and real-time WebSocket execution tracking.
 
-Whether you are building an AI video generator, an automated image synthesis pipeline, or a multi-GPU cloud cluster for ComfyUI workflows, `comfyui-orchestrator` provides high-level pool management, automatic server failover, prompt queuing, input image uploads, and output file downloads with zero external friction.
+Whether building an AI video application, an automated image synthesis pipeline, or managing a multi-GPU cluster of ComfyUI instances, `comfyui-orchestrator` provides pool management, server failover recovery, prompt queuing, image uploads, and output file downloads.
 
 ---
 
