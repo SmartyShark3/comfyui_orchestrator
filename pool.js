@@ -15,6 +15,7 @@ export class ComfyServerPool extends EventEmitter {
     this.servers = options.servers || [];
     this.recoveryTimeoutMs = options.recoveryTimeoutMs || 60000;
     this.telemetryIntervalMs = options.telemetryIntervalMs || 5000;
+    this.historyRetryMaxTimeMs = options.historyRetryMaxTimeMs !== undefined ? options.historyRetryMaxTimeMs : 30000;
 
     this.activeClients = new Map(); // serverUrl -> ComfyWsClient
     this.serverStates = options.serverStates || new Map();  // serverUrl -> state object
@@ -459,7 +460,23 @@ export class ComfyServerPool extends EventEmitter {
           const outputNodeId = job.jobType === 'image' ? imageOutputNodeId : videoOutputNodeId;
           this.emit('downloading', { serverUrl, jobId: job.id });
 
-          const history = await this.getPromptHistory(serverUrl, promptId);
+          let history = null;
+          let delay = 1000;
+          let totalWaited = 0;
+          while (true) {
+            history = await this.getPromptHistory(serverUrl, promptId);
+            if (history && history.outputs && history.outputs[outputNodeId]) {
+              break;
+            }
+            if (totalWaited >= this.historyRetryMaxTimeMs) {
+              break;
+            }
+            const nextWait = Math.min(delay, this.historyRetryMaxTimeMs - totalWaited);
+            await new Promise(resolve => setTimeout(resolve, nextWait));
+            totalWaited += nextWait;
+            delay = Math.min(delay * 1.5, 10000);
+          }
+
           if (!history || !history.outputs || !history.outputs[outputNodeId]) {
             throw new Error(`Could not find output node ${outputNodeId} in history`);
           }

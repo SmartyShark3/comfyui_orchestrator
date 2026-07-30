@@ -367,7 +367,7 @@ describe('ComfyServerPool', () => {
 
     it('should reject dispatch when history outputs do not contain the expected output node', async () => {
       const { pool, mocks } = createTestPool({ servers: ['http://gpu1:8188'] });
-      mocks.getPromptHistory.mockResolvedValueOnce({ outputs: {} });
+      mocks.getPromptHistory.mockResolvedValue({ outputs: {} });
       const client = pool.getClient('http://gpu1:8188');
       await vi.advanceTimersByTimeAsync(1);
 
@@ -383,7 +383,7 @@ describe('ComfyServerPool', () => {
 
       await vi.advanceTimersByTimeAsync(1);
       client.emit('execution_success', 'prompt-test-123');
-      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(30000);
 
       await expect(dispatchPromise).rejects.toThrow('Could not find output node 12 in history');
 
