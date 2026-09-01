@@ -1,12 +1,33 @@
 {
   "name": "comfyui-orchestrator",
   "version": "1.0.0",
-  "description": "ComfyUI client and state management orchestrator",
+  "description": "A Node.js API client, SDK, and multi-server pool orchestrator for ComfyUI",
   "main": "index.js",
   "type": "module",
+  "files": [
+    "index.js",
+    "client.js",
+    "pool.js",
+    "workflow.js",
+    "README.md"
+  ],
   "scripts": {
     "test": "vitest run"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SmartyShark3/comfyui_orchestrator.git"
+  },
+  "keywords": [
+    "comfyui",
+    "orchestrator",
+    "stable-diffusion",
+    "websocket",
+    "load-balancer",
+    "queue",
+    "workflow"
+  ],
+  "license": "MIT",
   "dependencies": {
     "ws": "^8.17.0"
   },
@@ -14,3 +35,4 @@
     "vitest": "^4.1.8"
   }
 }
+
