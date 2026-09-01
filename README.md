@@ -1,35 +1,32 @@
 # comfyui-orchestrator
 
-> **A Node.js API client, SDK, and multi-server pool orchestrator for ComfyUI, Stable Diffusion, and AI video generation pipelines.**
+> **A lightweight, robust Node.js SDK and multi-server pool orchestrator for ComfyUI, Stable Diffusion, and AI video/image generation pipelines.**
 
-`comfyui-orchestrator` is a lightweight, framework-agnostic Node.js library for ComfyUI workflow automation, multi-server load balancing, and real-time WebSocket execution tracking.
-
-Whether building an AI video application, an automated image synthesis pipeline, or managing a multi-GPU cluster of ComfyUI instances, `comfyui-orchestrator` provides pool management, server failover recovery, prompt queuing, image uploads, and output file downloads.
+`comfyui-orchestrator` is a production-ready Node.js library for distributed ComfyUI workflow automation, multi-GPU load balancing, real-time WebSocket execution tracking, and crash-resilient prompt dispatch.
 
 ---
 
-## Key Features & Keywords
+## Key Capabilities
 
-- 🏊 **ComfyUI Server Pool & Load Balancer**: High-level multi-server queue manager for distributed AI generation.
-  - Multi-GPU server availability tracking & job dispatch locking.
-  - Real-time ComfyUI telemetry monitoring (`cpuTemp`, `gpuTemp`).
-  - Automatic reconnection backoff & crash resilience (Scenarios A/B/C/D).
-  - Predicate-based active job cancellation (`pool.interruptJobs()`).
-  - Automatic orphan prompt sweeping to clean up stale ComfyUI queues.
-- ⚡ **ComfyUI WebSocket Client SDK**: Event-driven `ComfyWsClient` for tracking prompt progress.
-  - Granular WebSocket event emission: `connected`, `disconnected`, `progress`, `execution_start`, `executing`, `executed`, `execution_success`, `execution_error`.
-  - Auto-reconnect with error log suppression for offline ComfyUI instances.
-- 🎨 **ComfyUI Workflow Automation & Prompt Injector**:
-  - Pure JSON workflow cloning (zero mutation).
-  - Dynamic node targeting using standard title markers (`APP_PROMPT`, `APP_SEED`, `APP_INPUT_IMAGE`, `APP_NEGATIVE_PROMPT`, `APP_OUTPUT_VIDEO`, `APP_OUTPUT_IMAGE`, `APP_PROMPT_OUTPUT`).
-- 🌐 **ComfyUI REST API Helpers**:
-  - Direct helper functions for `/prompt`, `/history`, `/upload/image`, `/view`, and `/interrupt`.
-
----
-
-## Keywords / Use Cases
-
-`ComfyUI API Client` • `ComfyUI Node.js Library` • `Multi-GPU ComfyUI Load Balancer` • `Stable Diffusion Workflow Orchestrator` • `AI Video Generation Queue` • `ComfyUI WebSocket Monitor` • `ComfyUI Automation SDK` • `Flux & AnimateDiff Pipeline Manager`
+- 🏊 **Multi-Server GPU Pool & Load Balancer (`ComfyServerPool`)**:
+  - Distribute jobs across multiple ComfyUI GPU worker instances.
+  - Per-server availability tracking, concurrency locking, and health monitoring.
+  - Background telemetry polling (`cpuTemp`, `gpuTemp` from `/custom_comfy_monitoring/temp`).
+  - Dynamic cluster reconfiguration on the fly via `pool.syncServers()`.
+  - Predicate-based job interruption via `pool.interruptJobs(predicate)`.
+- ⚡ **Real-Time WebSocket Client (`ComfyWsClient`)**:
+  - Live execution tracking with granular events (`progress`, `executing`, `executed`, `execution_success`, `execution_error`).
+  - Automatic reconnection handling with intelligent error log suppression for offline instances.
+- 🛡️ **Crash & Reconnection Recovery**:
+  - Handles network interruptions and server restarts across 4 distinct lifecycle scenarios (Prompt Lost, Prompt Still Running, Prompt Completed While Disconnected, Prompt Failed on Server).
+  - Progressive backoff retry for `/history/{promptId}` (up to 30s) to eliminate disk-flush race conditions between execution success and history availability.
+- 🧹 **Automated Orphan Prompt Sweeper**:
+  - Detects unmanaged or stale jobs in ComfyUI queues upon connection, interrupts running orphans, and sweeps them from the queue.
+- 🎨 **Workflow Automation & Parameter Injection (`prepareWorkflowJson`)**:
+  - Deep-clone JSON workflow mutation without modifying source template objects.
+  - Standardized `_meta.title` node marker convention for prompts, seeds, input images, negative prompts, output nodes, and extracted wildcard outputs (`APP_PROMPT_OUTPUT`).
+- 🌐 **Zero-Dependency REST API Helpers**:
+  - Standalone helper functions for `/upload/image`, `/prompt`, `/history`, `/view`, and `/interrupt`.
 
 ---
 
@@ -39,130 +36,169 @@ Whether building an AI video application, an automated image synthesis pipeline,
 npm install comfyui-orchestrator
 ```
 
-*Or reference locally as a workspace package:*
-```json
-"dependencies": {
-  "comfyui-orchestrator": "file:../comfyui_orchestrator"
-}
-```
+*Native ES Module (Node.js 18+ required).*
 
 ---
 
-## API & Usage Examples
-
-### 1. Multi-Server Pool Management (`ComfyServerPool`)
-
-Manage multiple ComfyUI GPU servers with automatic failover, progress events, and telemetry monitoring:
+## Quick Start
 
 ```js
 import { ComfyServerPool } from 'comfyui-orchestrator';
+import fs from 'fs';
 
-// Initialize pool with configured ComfyUI endpoints
+// 1. Initialize server pool
 const pool = new ComfyServerPool({
   servers: ['http://gpu1:8188', 'http://gpu2:8188'],
   recoveryTimeoutMs: 60000,
   telemetryIntervalMs: 5000,
-  getTrackedPromptIds: () => new Set(['prompt-id-1', 'prompt-id-2'])
+  historyRetryMaxTimeMs: 30000
 });
 
-// Telemetry monitoring (CPU/GPU temperature metrics)
-pool.on('telemetry', (healthList) => {
-  console.log('Server Health Metrics:', healthList);
-  // Example payload item:
-  // { url: 'http://gpu1:8188', status: 'connected', activeJob: 'job-101', cpuTemp: 45, gpuTemp: 68 }
-});
-
-// Track sampling step progress across all ComfyUI GPU workers
+// 2. Listen to execution progress and telemetry
 pool.on('progress', ({ serverUrl, jobId, val, max, percent }) => {
-  console.log(`[${serverUrl}][${jobId}] Sampling step: ${val}/${max} (${percent}%)`);
+  console.log(`[${serverUrl}][${jobId}] Step ${val}/${max} (${percent}%)`);
 });
 
 pool.on('executing', ({ serverUrl, jobId, node }) => {
-  console.log(`[${serverUrl}][${jobId}] Executing Node: ${node}`);
+  console.log(`[${serverUrl}][${jobId}] Executing node: ${node}`);
 });
 
-// Start background connection monitoring and telemetry polling
+pool.on('telemetry', (healthList) => {
+  console.log('Cluster Health:', healthList);
+});
+
+// Start background telemetry polling & connection management
 pool.start();
 
-// Dispatch AI generation job to an available server
-const serverUrl = 'http://gpu1:8188';
+// 3. Dispatch a generation job to an available GPU server
+const targetServer = 'http://gpu1:8188';
 
-if (pool.isServerAvailable(serverUrl)) {
-  try {
-    const result = await pool.dispatch(serverUrl, {
-      id: 'job-101',
-      jobType: 'video', // 'video' or 'image'
-      prompt: 'A cinematic wide-angle shot of a cybernetic tiger in a neon city at night',
-      seed: 987654321,
-      negativePrompt: 'blurry, low quality, distorted',
-      workflowTemplate: rawWorkflowJson,
-      inputImage: {
-        buffer: imageBuffer,
-        filename: 'init_frame.png'
-      },
-      outputDestPath: './outputs/job_101.mp4'
-    });
+if (pool.isServerAvailable(targetServer)) {
+  const workflowTemplate = JSON.parse(fs.readFileSync('./workflow.json', 'utf-8'));
 
-    console.log('Generation Completed!');
-    console.log('Prompt ID:', result.promptId);
+  const result = await pool.dispatch(targetServer, {
+    id: 'job-001',
+    jobType: 'image', // 'image' or 'video'
+    prompt: 'masterpiece portrait of a futuristic cyberpunk traveler, 8k',
+    seed: 424242,
+    negativePrompt: 'blurry, deformed, low quality',
+    workflowTemplate,
+    inputImage: {
+      buffer: fs.readFileSync('./input_face.png'),
+      filename: 'input_face.png'
+    },
+    outputDestPath: './outputs/job_001.png'
+  });
+
+  console.log('Completed prompt ID:', result.promptId);
+  console.log('Saved to outputDestPath:', './outputs/job_001.png');
+  if (result.resolvedPrompt) {
     console.log('Resolved Wildcard Prompt:', result.resolvedPrompt);
-  } catch (err) {
-    console.error('Job Dispatch Error:', err.message);
   }
 }
-
-// Cancel or interrupt active jobs by workspace or custom condition
-await pool.interruptJobs(job => job.workspaceId === 'ws_123');
-
-// Clean up all client sockets and background timers when tearing down
-pool.stop();
 ```
 
 ---
 
-### 2. Low-Level ComfyUI WebSocket Client (`ComfyWsClient`)
+## API Reference
 
-Directly subscribe to ComfyUI execution events via WebSocket:
+### 1. `ComfyServerPool`
+
+High-level multi-server manager with queue locking, failover, telemetry, and automated dispatch lifecycle.
+
+#### Constructor Options
+
+```js
+const pool = new ComfyServerPool(options);
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `servers` | `string[]` | `[]` | List of ComfyUI base HTTP URLs (e.g. `['http://127.0.0.1:8188']`). |
+| `recoveryTimeoutMs` | `number` | `60000` | Max duration (ms) to wait for disconnected server reconnection before failing active jobs. |
+| `telemetryIntervalMs` | `number` | `5000` | Interval (ms) for polling temperature telemetry from `/custom_comfy_monitoring/temp`. |
+| `historyRetryMaxTimeMs` | `number` | `30000` | Max time (ms) for progressive backoff polling of `/history/{promptId}` outputs after execution. |
+| `getTrackedPromptIds` | `() => Set<string>` | `() => new Set()` | Optional callback returning prompt IDs tracked by external app to protect them from orphan sweeping. |
+| `serverStates` | `Map` | `new Map()` | Optional pre-existing server states map. |
+
+#### Methods
+
+- **`pool.start()`**: Starts background telemetry polling and establishes active WebSocket connections to configured servers.
+- **`pool.stop()`**: Stops background polling, clears reconnect timers, rejects pending dispatch promises, and terminates all active WebSocket clients.
+- **`pool.isServerAvailable(serverUrl)`**: Returns `true` if the server is connected and has no active job.
+- **`pool.getServerState(serverUrl)`**: Returns a snapshot `{ status, activeJob, cpuTemp, gpuTemp }` or `null`.
+- **`pool.getHealthList()`**: Returns an array of `{ url, status, activeJob, cpuTemp, gpuTemp }` for all configured servers.
+- **`pool.syncServers(newServers)`**: Dynamically updates the server list, connects to new servers, and disconnects removed servers.
+- **`pool.dispatch(serverUrl, job)`**: Dispatches a generation job. Returns a `Promise<{ serverUrl, promptId, history, resolvedPrompt }>`.
+- **`pool.cancel(serverUrl, jobId)`**: Cancels an active job on a specific server, interrupts execution on ComfyUI, and rejects the dispatch promise.
+- **`pool.interruptJobs(predicateFn)`**: Cancels and interrupts all active jobs where `predicateFn(activeJob)` evaluates to `true`.
+
+#### Job Options (`pool.dispatch(serverUrl, job)`)
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `id` | `string` | Yes | Unique identifier for the job. |
+| `jobType` | `'image' \| 'video'` | Yes | Determines whether output is extracted from `APP_OUTPUT_IMAGE` or `APP_OUTPUT_VIDEO`. |
+| `prompt` | `string` | Yes | Positive prompt injected into `APP_PROMPT`. |
+| `seed` | `number` | Yes | Seed injected into `APP_SEED`. |
+| `workflowTemplate` | `object` | Yes | ComfyUI API workflow JSON object. |
+| `negativePrompt` | `string` | No | Suffix appended to `APP_NEGATIVE_PROMPT`. |
+| `inputImage` | `{ buffer: Buffer, filename: string }` | No | Uploaded to ComfyUI `/upload/image` and filename injected into `APP_INPUT_IMAGE`. |
+| `outputDestPath` | `string` | Yes | Local destination file path where generated image/video will be downloaded. |
+
+#### Events Emitted by `ComfyServerPool`
+
+| Event | Arguments | Description |
+|---|---|---|
+| `serverConnected` | `serverUrl` | Emitted when a server's WebSocket connects. |
+| `serverDisconnected` | `serverUrl` | Emitted when a server's WebSocket disconnects. |
+| `serverError` | `{ serverUrl, error }` | Emitted on WebSocket communication errors. |
+| `queued` | `{ serverUrl, jobId, promptId }` | Emitted when prompt is accepted into ComfyUI queue. |
+| `executing` | `{ serverUrl, jobId, node }` | Emitted when ComfyUI begins processing a workflow node. |
+| `progress` | `{ serverUrl, jobId, val, max, percent }` | Emitted during KSampler sampling step progress (percent scaled 35%–80%). |
+| `downloading` | `{ serverUrl, jobId }` | Emitted after execution succeeds when downloading output file. |
+| `telemetry` | `healthList` | Emitted after each telemetry polling cycle. |
+
+---
+
+### 2. `ComfyWsClient`
+
+Low-level, event-driven WebSocket client wrapper for ComfyUI.
 
 ```js
 import { ComfyWsClient } from 'comfyui-orchestrator';
 
-const client = new ComfyWsClient('http://localhost:8188', 'client-session-123');
+const client = new ComfyWsClient('http://127.0.0.1:8188', 'my-client-id');
 
-client.on('connected', () => console.log('WebSocket connection established'));
-client.on('disconnected', () => console.log('WebSocket disconnected'));
+client.on('connected', () => console.log('Connected to ComfyUI WS'));
+client.on('disconnected', () => console.log('Disconnected from ComfyUI WS'));
 client.on('progress', (val, max, node, promptId) => {
-  console.log(`[Prompt ${promptId}] Sampling step ${val}/${max} on Node ${node}`);
+  console.log(`[${promptId}] Progress: ${val}/${max} on Node ${node}`);
+});
+client.on('executing', (node, promptId) => {
+  console.log(`[${promptId}] Executing Node: ${node}`);
+});
+client.on('executed', (promptId, node, output) => {
+  console.log(`[${promptId}] Node ${node} executed with output:`, output);
 });
 client.on('execution_success', (promptId) => {
-  console.log(`Execution succeeded for prompt: ${promptId}`);
+  console.log(`[${promptId}] Execution complete!`);
 });
 client.on('execution_error', (promptId, exception) => {
-  console.error(`Execution error for prompt ${promptId}:`, exception);
+  console.error(`[${promptId}] Execution error:`, exception);
 });
 
-// Connect to ComfyUI WebSocket endpoint
 client.connect();
 
-// Disconnect when finished
+// When done:
 // client.disconnect();
 ```
 
 ---
 
-### 3. Workflow JSON Preparation (`prepareWorkflowJson`)
+### 3. Workflow JSON Injection (`prepareWorkflowJson`)
 
-Inject parameters into ComfyUI workflow JSON files automatically using standard title markers (`_meta.title`):
-
-| Node Title Marker (`_meta.title`) | Target Field | Purpose |
-|---|---|---|
-| `APP_PROMPT` | `inputs.text` / `inputs.value` | Positive prompt text injection |
-| `APP_SEED` | `inputs.seed` / `inputs.noise_seed` / `inputs.value` | Seed number injection |
-| `APP_INPUT_IMAGE` | `inputs.image` | Starting image filename injection |
-| `APP_NEGATIVE_PROMPT` | `inputs.text` / `inputs.value` | Negative prompt suffix appending |
-| `APP_OUTPUT_VIDEO` | Output node | Video file destination node |
-| `APP_OUTPUT_IMAGE` | Output node | Image file destination node |
-| `APP_PROMPT_OUTPUT` | Output node | Extracted wildcard prompt node |
+Pure, non-mutating workflow JSON preparation function using node title conventions (`_meta.title`).
 
 ```js
 import { prepareWorkflowJson } from 'comfyui-orchestrator';
@@ -172,23 +208,36 @@ const {
   foundInputImage,
   foundPrompt,
   foundSeed,
+  foundNegativePrompt,
   videoOutputNodeId,
   imageOutputNodeId,
   promptOutputNodeId
 } = prepareWorkflowJson(
-  templateWorkflowJson,
-  'A futuristic cyberpunk skyscraper under heavy rain', // Prompt
-  424242,                                              // Seed
-  'uploaded_input_frame.png',                         // Input Image Filename
-  'ugly, distorted, artifacting'                       // Negative Prompt Suffix
+  rawWorkflowJson,
+  'cinematic portrait of an astronaut on Mars', // Positive prompt
+  123456789,                                   // Seed
+  'uploaded_source.png',                       // Input image name
+  'bad quality, lowres, watermark'             // Negative prompt suffix
 );
-
-console.log('Prepared Workflow:', workflow);
 ```
+
+#### Supported Node Title Markers (`_meta.title`)
+
+| Title Marker | Target Inputs | Description |
+|---|---|---|
+| `APP_PROMPT` | `inputs.text` or `inputs.value` | Injects positive prompt string. |
+| `APP_SEED` | `inputs.seed`, `inputs.noise_seed`, or `inputs.value` | Injects seed integer. |
+| `APP_INPUT_IMAGE` | `inputs.image` or `inputs.value` | Injects uploaded input image filename. |
+| `APP_NEGATIVE_PROMPT` | `inputs.text` or `inputs.value` | Appends negative prompt suffix (with automatic comma separation). |
+| `APP_OUTPUT_VIDEO` | Output node | Identifies video output node (for `gifs`/`videos`). |
+| `APP_OUTPUT_IMAGE` | Output node | Identifies image output node (for `images`). |
+| `APP_PROMPT_OUTPUT` | Text output node | Extracts resolved prompt text from history (e.g. wildcards). |
 
 ---
 
-### 4. Low-Level REST API Helpers
+### 4. REST API Helpers
+
+Zero-dependency HTTP helper functions for direct ComfyUI API interactions:
 
 ```js
 import {
@@ -199,29 +248,46 @@ import {
   interruptComfy
 } from 'comfyui-orchestrator';
 
-const serverUrl = 'http://localhost:8188';
+const serverUrl = 'http://127.0.0.1:8188';
 
-// 1. Upload input image buffer to ComfyUI /upload/image
-const savedFilename = await uploadImageToComfy(serverUrl, imageBuffer, 'input.png');
+// 1. Upload an image buffer via multipart/form-data
+const uploadedFilename = await uploadImageToComfy(serverUrl, imageBuffer, 'input.png');
 
-// 2. Queue prompt workflow to ComfyUI /prompt
+// 2. Queue prompt workflow
 const promptId = await queuePromptToComfy(serverUrl, workflowJson, 'client-id-123');
 
-// 3. Fetch prompt execution history from /history/{promptId}
+// 3. Fetch prompt execution history
 const history = await getComfyPromptHistory(serverUrl, promptId);
 
-// 4. Download output file from /view directly to disk
-await downloadComfyFile(serverUrl, 'generated_00001.mp4', '', 'output', './local_dest.mp4');
+// 4. Download output file from /view endpoint directly to disk
+await downloadComfyFile(serverUrl, 'ComfyUI_00001_.png', '', 'output', './downloaded.png');
 
-// 5. Interrupt running execution via /interrupt
-const isInterrupted = await interruptComfy(serverUrl);
+// 5. Interrupt active generation
+const ok = await interruptComfy(serverUrl);
 ```
+
+---
+
+## Architecture & Reliability Features
+
+### Failover & Reconnect Recovery (Scenarios A–D)
+When a GPU server temporarily disconnects during an active job:
+1. **Scenario A (Lost)**: If the prompt is no longer in ComfyUI queue or history upon reconnection, the active job promise is rejected.
+2. **Scenario B (Running)**: If ComfyUI is still executing the prompt upon reconnection, execution tracking resumes seamlessly without interrupting the worker.
+3. **Scenario C (Completed)**: If the job completed while disconnected, the output file is automatically downloaded and the job promise resolves successfully.
+4. **Scenario D (Failed)**: If ComfyUI suffered an execution error while disconnected, the error details and node exception are retrieved from history and the job promise is rejected.
+
+### Progressive History Backoff
+On fast nodes or network latency, ComfyUI WebSocket may emit `execution_success` milliseconds before file writes are committed to `/history`. `ComfyServerPool` automatically retries fetching history with progressive exponential backoff (up to `historyRetryMaxTimeMs`, default 30s) to guarantee outputs are ready before downloading.
+
+### Automated Orphan Sweeper
+On connection establishment, `ComfyServerPool` queries `/queue` to discover any stale jobs left behind by previous crashes. Any prompt ID not actively managed by the pool or tracked by `getTrackedPromptIds()` is immediately interrupted and deleted from the queue.
 
 ---
 
 ## Testing
 
-Run unit tests with Vitest:
+Run the full test suite (65 tests across pool, client, and workflow modules):
 
 ```bash
 npm test
@@ -231,4 +297,4 @@ npm test
 
 ## License
 
-MIT
+[MIT](LICENSE)
