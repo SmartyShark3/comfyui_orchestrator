@@ -89,22 +89,63 @@ describe('ComfyServerPool', () => {
         status: 'connected',
         activeJob: null,
         cpuTemp: null,
-        gpuTemp: null
+        gpuTemp: null,
+        supportedWorkflows: []
       });
 
       pool.stop();
     });
 
     it('should return health list for all configured servers via getHealthList', async () => {
-      const { pool } = createTestPool({ servers: ['http://gpu1:8188', 'http://gpu2:8188'] });
+      const { pool } = createTestPool({
+        servers: [
+          'http://gpu1:8188',
+          { url: 'http://gpu2:8188', supportedWorkflows: ['image_workflow.json', 'Z-Image-Turbo'] }
+        ]
+      });
       pool.getClient('http://gpu1:8188');
       await vi.advanceTimersByTimeAsync(1);
 
       const healthList = pool.getHealthList();
       expect(healthList).toEqual([
-        { url: 'http://gpu1:8188', status: 'connected', activeJob: null, cpuTemp: null, gpuTemp: null },
-        { url: 'http://gpu2:8188', status: 'offline', activeJob: null, cpuTemp: null, gpuTemp: null }
+        { url: 'http://gpu1:8188', status: 'connected', activeJob: null, cpuTemp: null, gpuTemp: null, supportedWorkflows: [] },
+        { url: 'http://gpu2:8188', status: 'offline', activeJob: null, cpuTemp: null, gpuTemp: null, supportedWorkflows: ['image_workflow.json', 'Z-Image-Turbo'] }
       ]);
+
+      pool.stop();
+    });
+
+    it('should correctly check supportedWorkflows with isWorkflowSupported', () => {
+      const pool = new ComfyServerPool({
+        servers: [
+          'http://gpu1:8188',
+          { url: 'http://gpu2:8188', supportedWorkflows: ['Z-Image-Turbo', 'video_workflow.json'] },
+          { url: 'http://gpu3:8188', supportedWorkflows: ['pony_t2i_app.json'] }
+        ]
+      });
+
+      const imageWorkflows = [
+        { name: 'Z-Image-Turbo', file: 'image_workflow.json' },
+        { name: 'Pony SDXL', file: 'pony_t2i_app.json' }
+      ];
+
+      // gpu1 supports all workflows (empty supportedWorkflows)
+      expect(pool.isWorkflowSupported('http://gpu1:8188', 'image_workflow.json', imageWorkflows)).toBe(true);
+      expect(pool.isWorkflowSupported('http://gpu1:8188', 'pony_t2i_app.json', imageWorkflows)).toBe(true);
+      expect(pool.isWorkflowSupported('http://gpu1:8188', 'video_workflow.json', imageWorkflows)).toBe(true);
+
+      // gpu2 supports Z-Image-Turbo (matches both by name and file) and video_workflow.json
+      expect(pool.isWorkflowSupported('http://gpu2:8188', 'image_workflow.json', imageWorkflows)).toBe(true);
+      expect(pool.isWorkflowSupported('http://gpu2:8188', 'Z-Image-Turbo', imageWorkflows)).toBe(true);
+      expect(pool.isWorkflowSupported('http://gpu2:8188', 'video_workflow.json', imageWorkflows)).toBe(true);
+      expect(pool.isWorkflowSupported('http://gpu2:8188', 'pony_t2i_app.json', imageWorkflows)).toBe(false);
+      expect(pool.isWorkflowSupported('http://gpu2:8188', 'Pony SDXL', imageWorkflows)).toBe(false);
+
+      // gpu3 supports Pony SDXL by filename and display name cross-reference
+      expect(pool.isWorkflowSupported('http://gpu3:8188', 'pony_t2i_app.json', imageWorkflows)).toBe(true);
+      expect(pool.isWorkflowSupported('http://gpu3:8188', 'Pony SDXL', imageWorkflows)).toBe(true);
+      expect(pool.isWorkflowSupported('http://gpu3:8188', 'image_workflow.json', imageWorkflows)).toBe(false);
+      expect(pool.isWorkflowSupported('http://gpu3:8188', 'video_workflow.json', imageWorkflows)).toBe(false);
 
       pool.stop();
     });

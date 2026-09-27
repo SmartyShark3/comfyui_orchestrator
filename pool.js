@@ -9,10 +9,80 @@ import {
 } from './client.js';
 import { prepareWorkflowJson } from './workflow.js';
 
+export function normalizeServerEntry(entry) {
+  if (typeof entry === 'string') {
+    return { url: entry.trim(), supportedWorkflows: [] };
+  }
+  if (entry && typeof entry === 'object' && entry.url) {
+    const workflows = Array.isArray(entry.supportedWorkflows)
+      ? entry.supportedWorkflows
+      : (Array.isArray(entry.workflows) ? entry.workflows : []);
+    return {
+      url: entry.url.trim(),
+      supportedWorkflows: workflows.map(w => String(w).trim()).filter(Boolean)
+    };
+  }
+  return null;
+}
+
+export function isWorkflowSupported(serverEntryOrUrl, workflowIdentifier, imageWorkflows = []) {
+  let supported = [];
+  if (typeof serverEntryOrUrl === 'string') {
+    supported = [];
+  } else if (serverEntryOrUrl && typeof serverEntryOrUrl === 'object') {
+    supported = Array.isArray(serverEntryOrUrl.supportedWorkflows)
+      ? serverEntryOrUrl.supportedWorkflows
+      : (Array.isArray(serverEntryOrUrl.workflows) ? serverEntryOrUrl.workflows : []);
+  }
+
+  if (!supported || supported.length === 0 || supported.includes('*')) {
+    return true;
+  }
+
+  if (!workflowIdentifier) return true;
+
+  const target = String(workflowIdentifier).toLowerCase();
+  // Direct match (case-insensitive)
+  if (supported.some(w => String(w).toLowerCase() === target)) {
+    return true;
+  }
+
+  // Cross-reference with imageWorkflows display name / file
+  if (Array.isArray(imageWorkflows)) {
+    for (const iw of imageWorkflows) {
+      if (iw.file && iw.file.toLowerCase() === target) {
+        if (iw.name && supported.some(w => String(w).toLowerCase() === iw.name.toLowerCase())) {
+          return true;
+        }
+      }
+      if (iw.name && iw.name.toLowerCase() === target) {
+        if (iw.file && supported.some(w => String(w).toLowerCase() === iw.file.toLowerCase())) {
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
 export class ComfyServerPool extends EventEmitter {
   constructor(options = {}) {
     super();
-    this.servers = options.servers || [];
+    const rawServers = options.servers || [];
+    this.serverEntries = new Map();
+    this.servers = [];
+
+    for (const raw of rawServers) {
+      const norm = normalizeServerEntry(raw);
+      if (norm && norm.url) {
+        this.serverEntries.set(norm.url, norm);
+        if (!this.servers.includes(norm.url)) {
+          this.servers.push(norm.url);
+        }
+      }
+    }
+
     this.recoveryTimeoutMs = options.recoveryTimeoutMs || 60000;
     this.telemetryIntervalMs = options.telemetryIntervalMs || 5000;
     this.historyRetryMaxTimeMs = options.historyRetryMaxTimeMs !== undefined ? options.historyRetryMaxTimeMs : 30000;
@@ -36,26 +106,36 @@ export class ComfyServerPool extends EventEmitter {
     return Boolean(state && state.status === 'connected' && !state.activeJob);
   }
 
+  isWorkflowSupported(serverUrl, workflowIdentifier, imageWorkflows = []) {
+    const entry = this.serverEntries.get(serverUrl);
+    if (!entry) return true;
+    return isWorkflowSupported(entry, workflowIdentifier, imageWorkflows);
+  }
+
   getServerState(serverUrl) {
     const state = this.serverStates.get(serverUrl);
     if (!state) return null;
+    const entry = this.serverEntries.get(serverUrl);
     return {
       status: state.status,
       activeJob: state.activeJob ? { ...state.activeJob } : null,
       cpuTemp: state.cpuTemp,
-      gpuTemp: state.gpuTemp
+      gpuTemp: state.gpuTemp,
+      supportedWorkflows: entry?.supportedWorkflows || []
     };
   }
 
   getHealthList() {
     return this.servers.map(url => {
       const state = this.getOrCreateServerState(url);
+      const entry = this.serverEntries.get(url);
       return {
         url,
         status: state.status,
         activeJob: state.activeJob ? (state.activeJob.nodeId || state.activeJob.rootId || state.activeJob.id) : null,
         cpuTemp: state.cpuTemp,
-        gpuTemp: state.gpuTemp
+        gpuTemp: state.gpuTemp,
+        supportedWorkflows: entry?.supportedWorkflows || []
       };
     });
   }
@@ -111,7 +191,21 @@ export class ComfyServerPool extends EventEmitter {
   }
 
   syncServers(newServers) {
-    this.servers = newServers || [];
+    const rawServers = newServers || [];
+    this.serverEntries.clear();
+    const newServerUrls = [];
+
+    for (const raw of rawServers) {
+      const norm = normalizeServerEntry(raw);
+      if (norm && norm.url) {
+        this.serverEntries.set(norm.url, norm);
+        if (!newServerUrls.includes(norm.url)) {
+          newServerUrls.push(norm.url);
+        }
+      }
+    }
+
+    this.servers = newServerUrls;
     const configuredServers = new Set(this.servers);
 
     // Clean up unconfigured servers

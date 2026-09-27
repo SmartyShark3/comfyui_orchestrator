@@ -11,6 +11,7 @@
 - 🏊 **Multi-Server GPU Pool & Load Balancer (`ComfyServerPool`)**:
   - Distribute jobs across multiple ComfyUI GPU worker instances.
   - Per-server availability tracking, concurrency locking, and health monitoring.
+  - Granular workflow routing with `supportedWorkflows` allowlists per server (matching filenames or display names).
   - Background telemetry polling (`cpuTemp`, `gpuTemp` from `/custom_comfy_monitoring/temp`).
   - Dynamic cluster reconfiguration on the fly via `pool.syncServers()`.
   - Predicate-based job interruption via `pool.interruptJobs(predicate)`.
@@ -46,9 +47,15 @@ npm install comfyui-orchestrator
 import { ComfyServerPool } from 'comfyui-orchestrator';
 import fs from 'fs';
 
-// 1. Initialize server pool
+// 1. Initialize server pool with optional per-server workflow flags
 const pool = new ComfyServerPool({
-  servers: ['http://gpu1:8188', 'http://gpu2:8188'],
+  servers: [
+    'http://gpu1:8188', // supports all workflows
+    {
+      url: 'http://gpu2:8188',
+      supportedWorkflows: ['Z-Image-Turbo', 'video_workflow.json'] // restricted workflows
+    }
+  ],
   recoveryTimeoutMs: 60000,
   telemetryIntervalMs: 5000,
   historyRetryMaxTimeMs: 30000
@@ -73,7 +80,7 @@ pool.start();
 // 3. Dispatch a generation job to an available GPU server
 const targetServer = 'http://gpu1:8188';
 
-if (pool.isServerAvailable(targetServer)) {
+if (pool.isServerAvailable(targetServer) && pool.isWorkflowSupported(targetServer, 'image_workflow.json')) {
   const workflowTemplate = JSON.parse(fs.readFileSync('./workflow.json', 'utf-8'));
 
   const result = await pool.dispatch(targetServer, {
@@ -114,7 +121,7 @@ const pool = new ComfyServerPool(options);
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `servers` | `string[]` | `[]` | List of ComfyUI base HTTP URLs (e.g. `['http://127.0.0.1:8188']`). |
+| `servers` | `(string \| { url: string, supportedWorkflows?: string[] })[]` | `[]` | List of ComfyUI base HTTP URLs or server config objects with workflow allowlists. |
 | `recoveryTimeoutMs` | `number` | `60000` | Max duration (ms) to wait for disconnected server reconnection before failing active jobs. |
 | `telemetryIntervalMs` | `number` | `5000` | Interval (ms) for polling temperature telemetry from `/custom_comfy_monitoring/temp`. |
 | `historyRetryMaxTimeMs` | `number` | `30000` | Max time (ms) for progressive backoff polling of `/history/{promptId}` outputs after execution. |
@@ -126,8 +133,9 @@ const pool = new ComfyServerPool(options);
 - **`pool.start()`**: Starts background telemetry polling and establishes active WebSocket connections to configured servers.
 - **`pool.stop()`**: Stops background polling, clears reconnect timers, rejects pending dispatch promises, and terminates all active WebSocket clients.
 - **`pool.isServerAvailable(serverUrl)`**: Returns `true` if the server is connected and has no active job.
-- **`pool.getServerState(serverUrl)`**: Returns a snapshot `{ status, activeJob, cpuTemp, gpuTemp }` or `null`.
-- **`pool.getHealthList()`**: Returns an array of `{ url, status, activeJob, cpuTemp, gpuTemp }` for all configured servers.
+- **`pool.isWorkflowSupported(serverUrl, workflowIdentifier, imageWorkflows)`**: Returns `true` if the server supports the specified workflow (by file name or display name).
+- **`pool.getServerState(serverUrl)`**: Returns a snapshot `{ status, activeJob, cpuTemp, gpuTemp, supportedWorkflows }` or `null`.
+- **`pool.getHealthList()`**: Returns an array of `{ url, status, activeJob, cpuTemp, gpuTemp, supportedWorkflows }` for all configured servers.
 - **`pool.syncServers(newServers)`**: Dynamically updates the server list, connects to new servers, and disconnects removed servers.
 - **`pool.dispatch(serverUrl, job)`**: Dispatches a generation job. Returns a `Promise<{ serverUrl, promptId, history, resolvedPrompt }>`.
 - **`pool.cancel(serverUrl, jobId)`**: Cancels an active job on a specific server, interrupts execution on ComfyUI, and rejects the dispatch promise.
@@ -235,7 +243,25 @@ const {
 
 ---
 
-### 4. REST API Helpers
+### 4. Utilities & Helpers
+
+#### `isWorkflowSupported(serverEntryOrUrl, workflowIdentifier, imageWorkflows)`
+
+Checks if a server configuration entry allows a given workflow filename or display name.
+
+```js
+import { isWorkflowSupported } from 'comfyui-orchestrator';
+
+const server = { url: 'http://gpu2:8188', supportedWorkflows: ['Z-Image-Turbo'] };
+const allowed = isWorkflowSupported(server, 'image_workflow.json', [{ name: 'Z-Image-Turbo', file: 'image_workflow.json' }]);
+// true
+```
+
+#### `normalizeServerEntry(entry)`
+
+Normalizes a URL string or object into `{ url, supportedWorkflows: string[] }`.
+
+#### REST API Helpers
 
 Zero-dependency HTTP helper functions for direct ComfyUI API interactions:
 
@@ -287,7 +313,7 @@ On connection establishment, `ComfyServerPool` queries `/queue` to discover any 
 
 ## Testing
 
-Run the full test suite (65 tests across pool, client, and workflow modules):
+Run the full test suite (66 tests across pool, client, and workflow modules):
 
 ```bash
 npm test

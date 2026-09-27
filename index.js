@@ -12,5 +12,7 @@ export {
 } from './workflow.js';
 
 export {
-  ComfyServerPool
+  ComfyServerPool,
+  normalizeServerEntry,
+  isWorkflowSupported
 } from './pool.js';
