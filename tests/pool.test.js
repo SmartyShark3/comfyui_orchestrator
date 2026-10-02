@@ -22,6 +22,10 @@ vi.mock('ws', () => {
       }, 0);
     }
 
+    ping() {
+      this.emit('pong');
+    }
+
     terminate() {
       this.readyState = 3; // CLOSED
       this.emit('close');
@@ -915,6 +919,169 @@ describe('ComfyServerPool', () => {
 
       expect(state.cpuTemp).toBeNull();
       expect(state.gpuTemp).toBeNull();
+
+      pool.stop();
+    });
+  });
+
+  describe('Watchdog Polling & Recovery', () => {
+    it('should recover and complete job when WebSocket event is missed but prompt succeeded in ComfyUI history', async () => {
+      const { pool, mocks } = createTestPool({
+        servers: ['http://gpu1:8188'],
+        watchdogIntervalMs: 5000
+      });
+      pool.getClient('http://gpu1:8188');
+      await vi.advanceTimersByTimeAsync(1);
+
+      // Mock fetch: /queue is empty (done rendering), /history returns completed
+      const mockFetch = vi.fn().mockImplementation((url) => {
+        const urlStr = String(url);
+        if (urlStr.includes('/queue')) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve({ queue_running: [], queue_pending: [] }) });
+        }
+        if (urlStr.includes('/history/prompt-test-123')) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({
+              'prompt-test-123': {
+                status: { status_str: 'success', completed: true },
+                outputs: {
+                  '12': { gifs: [{ filename: 'vid.mp4', subfolder: '', type: 'output' }] }
+                }
+              }
+            })
+          });
+        }
+        return Promise.resolve({ ok: true });
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      mocks.getPromptHistory.mockResolvedValue({
+        status: { status_str: 'success', completed: true },
+        outputs: {
+          '12': { gifs: [{ filename: 'vid.mp4', subfolder: '', type: 'output' }] }
+        }
+      });
+
+      const outPath = path.join(tempDir, 'watchdog_out.mp4');
+      const dispatchPromise = pool.dispatch('http://gpu1:8188', {
+        id: 'job-watchdog-1',
+        jobType: 'video',
+        prompt: 'test prompt',
+        seed: 12345,
+        workflowTemplate: {},
+        outputDestPath: outPath
+      });
+
+      await vi.advanceTimersByTimeAsync(1);
+      // Notice: we DO NOT emit 'execution_success' on WebSocket!
+
+      // Trigger watchdog check
+      await pool.pollWatchdog();
+
+      const result = await dispatchPromise;
+      expect(result).toBeDefined();
+      expect(result.promptId).toBe('prompt-test-123');
+      expect(mocks.downloadFile).toHaveBeenCalledWith('http://gpu1:8188', 'vid.mp4', '', 'output', outPath);
+
+      pool.stop();
+    });
+
+    it('should fail active job when WebSocket event is missed but prompt failed in ComfyUI history', async () => {
+      const { pool, mocks } = createTestPool({
+        servers: ['http://gpu1:8188'],
+        watchdogIntervalMs: 5000
+      });
+      pool.getClient('http://gpu1:8188');
+      await vi.advanceTimersByTimeAsync(1);
+
+      const mockFetch = vi.fn().mockImplementation((url) => {
+        const urlStr = String(url);
+        if (urlStr.includes('/queue')) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve({ queue_running: [], queue_pending: [] }) });
+        }
+        if (urlStr.includes('/history/prompt-test-123')) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({
+              'prompt-test-123': {
+                status: {
+                  status_str: 'error',
+                  messages: [['execution_error', { exception_type: 'OutOfMemory', exception_message: 'CUDA out of memory' }]]
+                }
+              }
+            })
+          });
+        }
+        return Promise.resolve({ ok: true });
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      mocks.getPromptHistory.mockResolvedValue({
+        status: {
+          status_str: 'error',
+          messages: [['execution_error', { exception_type: 'OutOfMemory', exception_message: 'CUDA out of memory' }]]
+        }
+      });
+
+      const dispatchPromise = pool.dispatch('http://gpu1:8188', {
+        id: 'job-watchdog-fail',
+        jobType: 'video',
+        prompt: 'test prompt',
+        seed: 12345,
+        workflowTemplate: {},
+        outputDestPath: '/tmp/out.mp4'
+      });
+      dispatchPromise.catch(() => {});
+
+      await vi.advanceTimersByTimeAsync(1);
+
+      // Trigger watchdog check
+      await pool.pollWatchdog();
+
+      await expect(dispatchPromise).rejects.toThrow('OutOfMemory: CUDA out of memory');
+
+      pool.stop();
+    });
+
+    it('should not interrupt or complete a job that is still actively running in ComfyUI queue', async () => {
+      const { pool } = createTestPool({
+        servers: ['http://gpu1:8188'],
+        watchdogIntervalMs: 5000
+      });
+      pool.getClient('http://gpu1:8188');
+      await vi.advanceTimersByTimeAsync(1);
+
+      const mockFetch = vi.fn().mockImplementation((url) => {
+        const urlStr = String(url);
+        if (urlStr.includes('/queue')) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ queue_running: [['prompt-test-123', 'prompt-test-123']] })
+          });
+        }
+        return Promise.resolve({ ok: true });
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      let settled = false;
+      const dispatchPromise = pool.dispatch('http://gpu1:8188', {
+        id: 'job-watchdog-running',
+        jobType: 'video',
+        prompt: 'test prompt',
+        seed: 12345,
+        workflowTemplate: {},
+        outputDestPath: '/tmp/out.mp4'
+      }).then(() => { settled = true; }).catch(() => { settled = true; });
+
+      await vi.advanceTimersByTimeAsync(1);
+
+      await pool.pollWatchdog();
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(settled).toBe(false);
+      const state = pool.getServerState('http://gpu1:8188');
+      expect(state.activeJob).toBeDefined();
 
       pool.stop();
     });

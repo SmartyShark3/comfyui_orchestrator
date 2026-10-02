@@ -86,12 +86,15 @@ export class ComfyServerPool extends EventEmitter {
     this.recoveryTimeoutMs = options.recoveryTimeoutMs || 60000;
     this.telemetryIntervalMs = options.telemetryIntervalMs || 5000;
     this.historyRetryMaxTimeMs = options.historyRetryMaxTimeMs !== undefined ? options.historyRetryMaxTimeMs : 30000;
+    this.watchdogIntervalMs = options.watchdogIntervalMs !== undefined ? options.watchdogIntervalMs : 10000;
+    this.jobInactivityTimeoutMs = options.jobInactivityTimeoutMs !== undefined ? options.jobInactivityTimeoutMs : (process.env.NODE_ENV === 'test' ? 0 : 15 * 60 * 1000);
 
     this.activeClients = new Map(); // serverUrl -> ComfyWsClient
     this.serverStates = options.serverStates || new Map();  // serverUrl -> state object
     this.getTrackedPromptIds = options.getTrackedPromptIds || (() => new Set());
     
     this.telemetryInterval = null;
+    this.watchdogInterval = null;
     this.isPolling = false;
 
     // Initialize state objects for all servers
@@ -258,7 +261,7 @@ export class ComfyServerPool extends EventEmitter {
       }
       this.sweepOrphanedPrompts(serverUrl);
       if (isReconnection) {
-        this.verifyActiveJobState(serverUrl);
+        this.verifyActiveJobState(serverUrl, true);
       }
       isReconnection = true;
       this.emit('serverConnected', serverUrl);
@@ -306,6 +309,14 @@ export class ComfyServerPool extends EventEmitter {
 
     pollAll();
     this.telemetryInterval = setInterval(pollAll, this.telemetryIntervalMs);
+
+    if (this.watchdogIntervalMs > 0) {
+      this.watchdogInterval = setInterval(() => {
+        this.pollWatchdog().catch(err => {
+          console.error('[QueuePool] Unhandled error in pollWatchdog:', err);
+        });
+      }, this.watchdogIntervalMs);
+    }
   }
 
   stop() {
@@ -313,6 +324,10 @@ export class ComfyServerPool extends EventEmitter {
     if (this.telemetryInterval) {
       clearInterval(this.telemetryInterval);
       this.telemetryInterval = null;
+    }
+    if (this.watchdogInterval) {
+      clearInterval(this.watchdogInterval);
+      this.watchdogInterval = null;
     }
     for (const state of this.serverStates.values()) {
       if (state.disconnectTimer) {
@@ -417,9 +432,37 @@ export class ComfyServerPool extends EventEmitter {
     } catch (err) {}
   }
 
+  async pollWatchdog() {
+    if (!this.servers || this.servers.length === 0) return;
+    for (const url of this.servers) {
+      const state = this.serverStates.get(url);
+      if (state && state.status === 'connected' && state.activeJob && state.activeJob.promptId) {
+        // Stagnation timeout check: interrupt frozen jobs with no progress
+        if (this.jobInactivityTimeoutMs > 0 && state.lastActivityTime) {
+          if (Date.now() - state.lastActivityTime > this.jobInactivityTimeoutMs) {
+            console.warn(`[QueuePool] Job ${state.activeJob.id} on ${url} has been stagnant for ${Math.round((Date.now() - state.lastActivityTime) / 1000)}s without progress. Interrupting...`);
+            try {
+              await this.interrupt(url);
+            } catch (err) {}
+            if (state.activePromise) {
+              state.activePromise.onFailure(new Error(`Job timed out after ${Math.round(this.jobInactivityTimeoutMs / 60000)} minutes of inactivity`));
+            }
+            continue;
+          }
+        }
+
+        try {
+          await this.verifyActiveJobState(url, false);
+        } catch (err) {
+          console.error(`[QueuePool] Watchdog error checking ${url}:`, err);
+        }
+      }
+    }
+  }
+
   async checkPromptStatus(comfyUrl, promptId) {
     try {
-      const res = await fetch(`${comfyUrl}/queue`);
+      const res = await fetch(`${comfyUrl}/queue`, { signal: AbortSignal.timeout(5000) });
       if (res.ok) {
         const q = await res.json();
         const running = q.queue_running || [];
@@ -433,7 +476,7 @@ export class ComfyServerPool extends EventEmitter {
     } catch (err) {}
 
     try {
-      const res = await fetch(`${comfyUrl}/history/${promptId}`);
+      const res = await fetch(`${comfyUrl}/history/${promptId}`, { signal: AbortSignal.timeout(5000) });
       if (res.ok) {
         const hist = await res.json();
         const promptHistory = hist[promptId];
@@ -451,7 +494,7 @@ export class ComfyServerPool extends EventEmitter {
     return 'lost';
   }
 
-  async verifyActiveJobState(serverUrl) {
+  async verifyActiveJobState(serverUrl, isReconnection = false) {
     const state = this.getOrCreateServerState(serverUrl);
     if (!state || !state.activeJob || !state.activeJob.promptId) return;
 
@@ -463,8 +506,10 @@ export class ComfyServerPool extends EventEmitter {
 
     if (state.activePromise) {
       if (status === 'completed') {
+        state.lostCount = 0;
         state.activePromise.onSuccess(promptId);
       } else if (status === 'failed') {
+        state.lostCount = 0;
         let errorMsg = 'ComfyUI job failed or was interrupted';
         try {
           const history = await this.getPromptHistory(serverUrl, promptId);
@@ -480,6 +525,8 @@ export class ComfyServerPool extends EventEmitter {
           }
         } catch (err) {}
         state.activePromise.onFailure(new Error(errorMsg));
+      } else if (status === 'running') {
+        state.lostCount = 0;
       } else if (status === 'lost') {
         state.activePromise.onFailure(new Error('ComfyUI job lost on reconnect/crash'));
       }
@@ -501,6 +548,8 @@ export class ComfyServerPool extends EventEmitter {
       let videoOutputNodeId = null;
       let imageOutputNodeId = null;
       let promptOutputNodeId = null;
+      let isSettled = false;
+      let pendingEvents = [];
 
       const checkAborted = () => {
         if (!state.activeJob || state.activeJob.id !== job.id) {
@@ -518,18 +567,34 @@ export class ComfyServerPool extends EventEmitter {
       };
 
       const onProgress = (val, max, node, pid) => {
+        if (!promptId) {
+          pendingEvents.push({ type: 'progress', val, max, node, pid });
+          return;
+        }
         if (pid !== promptId) return;
+        state.lastActivityTime = Date.now();
         const percent = Math.floor(35 + (val / max) * 45); // Scale between 35% and 80%
         this.emit('progress', { serverUrl, jobId: job.id, val, max, percent });
       };
 
       const onExecuting = (node, pid) => {
+        if (!promptId) {
+          pendingEvents.push({ type: 'executing', node, pid });
+          return;
+        }
         if (pid !== promptId) return;
+        state.lastActivityTime = Date.now();
         this.emit('executing', { serverUrl, jobId: job.id, node });
       };
 
       const onError = (pid, exception) => {
+        if (!promptId) {
+          pendingEvents.push({ type: 'error', pid, exception });
+          return;
+        }
         if (pid !== promptId) return;
+        if (isSettled) return;
+        isSettled = true;
         cleanup();
         let errMsg = '';
         if (exception && typeof exception === 'object') {
@@ -548,7 +613,13 @@ export class ComfyServerPool extends EventEmitter {
       };
 
       const onSuccess = async (pid) => {
+        if (!promptId) {
+          pendingEvents.push({ type: 'success', pid });
+          return;
+        }
         if (pid !== promptId) return;
+        if (isSettled) return;
+        isSettled = true;
         cleanup();
         try {
           const outputNodeId = job.jobType === 'image' ? imageOutputNodeId : videoOutputNodeId;
@@ -614,12 +685,18 @@ export class ComfyServerPool extends EventEmitter {
       state.activePromise = {
         resolve,
         reject,
-        onSuccess: (pid) => onSuccess(pid),
+        onSuccess: (pid) => {
+          if (!isSettled) onSuccess(pid);
+        },
         onFailure: (err) => {
+          if (isSettled) return;
+          isSettled = true;
           cleanup();
           reject(err);
         },
         reject: (err) => {
+          if (isSettled) return;
+          isSettled = true;
           cleanup();
           reject(err);
         }
@@ -647,15 +724,28 @@ export class ComfyServerPool extends EventEmitter {
         } = this.prepareWorkflow(job.workflowTemplate, job.prompt, job.seed, localInputImageName, job.negativePrompt));
 
         checkAborted();
-        promptId = await this.queuePrompt(serverUrl, workflow, wsClient.clientId);
-        job.promptId = promptId;
-        this.emit('queued', { serverUrl, jobId: job.id, promptId });
 
-        // Register temporary WS listeners
+        // Register temporary WS listeners before queueing to avoid missing immediate events
         wsClient.on('progress', onProgress);
         wsClient.on('executing', onExecuting);
         wsClient.on('execution_error', onError);
         wsClient.on('execution_success', onSuccess);
+
+        promptId = await this.queuePrompt(serverUrl, workflow, wsClient.clientId);
+        job.promptId = promptId;
+        state.lastActivityTime = Date.now();
+        this.emit('queued', { serverUrl, jobId: job.id, promptId });
+
+        // Flush any events buffered before promptId was returned
+        for (const ev of pendingEvents) {
+          if (ev.pid === promptId) {
+            if (ev.type === 'progress') onProgress(ev.val, ev.max, ev.node, ev.pid);
+            else if (ev.type === 'executing') onExecuting(ev.node, ev.pid);
+            else if (ev.type === 'error') onError(ev.pid, ev.exception);
+            else if (ev.type === 'success') onSuccess(ev.pid);
+          }
+        }
+        pendingEvents = [];
 
       } catch (err) {
         cleanup();

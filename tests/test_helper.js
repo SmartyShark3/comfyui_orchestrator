@@ -16,6 +16,10 @@ export class MockWebSocket extends EventEmitter {
     }, 0);
   }
 
+  ping() {
+    this.emit('pong');
+  }
+
   terminate() {
     this.readyState = 3; // CLOSED
     this.emit('close');

@@ -29,7 +29,8 @@ export async function uploadImageToComfy(comfyUrl, fileBuffer, filename) {
       'Content-Type': `multipart/form-data; boundary=${boundary}`,
       'Content-Length': body.length.toString()
     },
-    body
+    body,
+    signal: AbortSignal.timeout(60000)
   });
 
   if (!response.ok) {
@@ -59,7 +60,8 @@ export async function queuePromptToComfy(comfyUrl, workflow, clientId) {
           }
         }
       }
-    })
+    }),
+    signal: AbortSignal.timeout(15000)
   });
 
   if (!response.ok) {
@@ -78,7 +80,7 @@ export async function downloadComfyFile(comfyUrl, filename, subfolder, type, loc
   const params = new URLSearchParams({ filename, subfolder: subfolder || '', type: type || 'output' });
   const viewUrl = `${comfyUrl}/view?${params.toString()}`;
   
-  const response = await fetch(viewUrl);
+  const response = await fetch(viewUrl, { signal: AbortSignal.timeout(60000) });
   if (!response.ok) {
     throw new Error(`Failed to download file from ComfyUI: ${response.statusText}`);
   }
@@ -86,6 +88,10 @@ export async function downloadComfyFile(comfyUrl, filename, subfolder, type, loc
   const arrayBuffer = await response.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
   
+  if (buffer.length === 0) {
+    throw new Error(`Downloaded empty file (0 bytes) from ComfyUI for ${filename}`);
+  }
+
   await fs.promises.mkdir(path.dirname(localDestPath), { recursive: true });
   await fs.promises.writeFile(localDestPath, buffer);
 }
@@ -94,7 +100,7 @@ export async function downloadComfyFile(comfyUrl, filename, subfolder, type, loc
  * Fetches prompt execution history.
  */
 export async function getComfyPromptHistory(comfyUrl, promptId) {
-  const response = await fetch(`${comfyUrl}/history/${promptId}`);
+  const response = await fetch(`${comfyUrl}/history/${promptId}`, { signal: AbortSignal.timeout(10000) });
   if (!response.ok) {
     throw new Error(`Failed to fetch history for prompt ${promptId}`);
   }
@@ -106,7 +112,7 @@ export async function getComfyPromptHistory(comfyUrl, promptId) {
  * Active client to track WebSocket updates for ComfyUI.
  */
 export class ComfyWsClient extends EventEmitter {
-  constructor(comfyUrl, clientId) {
+  constructor(comfyUrl, clientId, options = {}) {
     super();
     this.comfyUrl = comfyUrl;
     this.clientId = clientId;
@@ -114,6 +120,9 @@ export class ComfyWsClient extends EventEmitter {
     this.isConnected = false;
     this._manualDisconnect = false;
     this._connectionErrorLogged = false;
+    this.heartbeatIntervalMs = options.heartbeatIntervalMs !== undefined ? options.heartbeatIntervalMs : 15000;
+    this._heartbeatTimer = null;
+    this._isAwaitingPong = false;
   }
 
   connect() {
@@ -123,6 +132,7 @@ export class ComfyWsClient extends EventEmitter {
     if (this.ws) {
       const socket = this.ws;
       this.ws = null;
+      this._stopHeartbeat();
       try {
         socket.removeAllListeners();
       } catch (err) { }
@@ -146,8 +156,14 @@ export class ComfyWsClient extends EventEmitter {
       if (this.ws !== socket) return; // Ignore if this socket is no longer active
       this.isConnected = true;
       this._connectionErrorLogged = false;
+      this._startHeartbeat();
       this.emit('connected');
       console.log('Connected to ComfyUI WebSocket');
+    });
+
+    socket.on('pong', () => {
+      if (this.ws !== socket) return;
+      this._isAwaitingPong = false;
     });
 
     socket.on('message', (rawData, isBinary) => {
@@ -181,6 +197,7 @@ export class ComfyWsClient extends EventEmitter {
 
     socket.on('close', () => {
       if (this.ws === socket) {
+        this._stopHeartbeat();
         this.ws = null;
         this.isConnected = false;
         this.emit('disconnected');
@@ -209,6 +226,7 @@ export class ComfyWsClient extends EventEmitter {
 
     socket.on('error', (err) => {
       if (this.ws !== socket) return; // Ignore if this socket is no longer active
+      this._stopHeartbeat();
       
       const isConnectionError = ['ECONNREFUSED', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'ECONNRESET'].includes(err.code) || err.message.includes('ETIMEDOUT') || err.message.includes('ECONNREFUSED');
       const wasLogged = this._connectionErrorLogged;
@@ -228,8 +246,45 @@ export class ComfyWsClient extends EventEmitter {
     });
   }
 
+  _startHeartbeat() {
+    this._stopHeartbeat();
+    if (this.heartbeatIntervalMs <= 0) return;
+    this._isAwaitingPong = false;
+    this._heartbeatTimer = setInterval(() => {
+      if (!this.ws || !this.isConnected) {
+        this._stopHeartbeat();
+        return;
+      }
+      if (this._isAwaitingPong) {
+        console.warn(`[ComfyWsClient] WebSocket heartbeat timeout on ${this.comfyUrl}. Terminating socket...`);
+        this._stopHeartbeat();
+        try {
+          this.ws.terminate();
+        } catch (e) {}
+        return;
+      }
+      this._isAwaitingPong = true;
+      try {
+        if (typeof this.ws.ping === 'function') {
+          this.ws.ping();
+        }
+      } catch (err) {
+        this._stopHeartbeat();
+      }
+    }, this.heartbeatIntervalMs);
+  }
+
+  _stopHeartbeat() {
+    if (this._heartbeatTimer) {
+      clearInterval(this._heartbeatTimer);
+      this._heartbeatTimer = null;
+    }
+    this._isAwaitingPong = false;
+  }
+
   disconnect() {
     this._manualDisconnect = true;
+    this._stopHeartbeat();
     this.isConnected = false;
     if (this.ws) {
       const socket = this.ws;
@@ -253,7 +308,8 @@ export class ComfyWsClient extends EventEmitter {
 export async function interruptComfy(comfyUrl) {
   try {
     const response = await fetch(`${comfyUrl}/interrupt`, {
-      method: 'POST'
+      method: 'POST',
+      signal: AbortSignal.timeout(5000)
     });
     return response.ok;
   } catch (err) {

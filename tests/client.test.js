@@ -286,7 +286,9 @@ describe('ComfyUI API Helpers', () => {
 
     const history = await getComfyPromptHistory('http://localhost:8188', 'prompt_123');
     expect(history).toEqual({ status: 'success', outputs: {} });
-    expect(fetch).toHaveBeenCalledWith('http://localhost:8188/history/prompt_123');
+    expect(fetch).toHaveBeenCalledWith('http://localhost:8188/history/prompt_123', expect.objectContaining({
+      signal: expect.anything()
+    }));
   });
 
   it('should throw error when getComfyPromptHistory receives non-ok response', async () => {
@@ -369,7 +371,10 @@ describe('ComfyUI API Helpers', () => {
 
     const ok = await interruptComfy('http://localhost:8188');
     expect(ok).toBe(true);
-    expect(fetch).toHaveBeenCalledWith('http://localhost:8188/interrupt', { method: 'POST' });
+    expect(fetch).toHaveBeenCalledWith('http://localhost:8188/interrupt', expect.objectContaining({
+      method: 'POST',
+      signal: expect.anything()
+    }));
   });
 
   it('should return false when interruptComfy fails', async () => {
