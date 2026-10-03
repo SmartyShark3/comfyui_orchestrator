@@ -622,11 +622,49 @@ describe('ComfyServerPool', () => {
 
       client.emit('disconnected');
       client.emit('connected'); // reconnect (isReconnection = true)
-      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(6000);
 
       expect(onFailureSpy).toHaveBeenCalledWith(expect.objectContaining({
         message: 'ComfyUI job lost on reconnect/crash'
       }));
+
+      pool.stop();
+    });
+
+    it('Scenario A2: should recover and NOT reject job if initial check returns lost but subsequent check returns running', async () => {
+      const { pool } = createTestPool({ servers: ['http://gpu1:8188'] });
+
+      let callCount = 0;
+      const mockFetch = vi.fn().mockImplementation((url) => {
+        const urlStr = String(url);
+        if (urlStr.includes('/queue')) {
+          callCount++;
+          if (callCount === 1) {
+            return Promise.resolve({ ok: true, json: () => Promise.resolve({ queue_running: [], queue_pending: [] }) });
+          }
+          return Promise.resolve({ ok: true, json: () => Promise.resolve({ queue_running: [['prompt-transient', 'prompt-transient']] }) });
+        }
+        if (urlStr.includes('/history')) {
+          return Promise.resolve({ ok: false, status: 404 });
+        }
+        return Promise.resolve({ ok: true });
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      const client = pool.getClient('http://gpu1:8188');
+      await vi.advanceTimersByTimeAsync(1);
+
+      const state = pool.serverStates.get('http://gpu1:8188');
+      state.activeJob = { id: 'job-transient', promptId: 'prompt-transient' };
+      const onFailureSpy = vi.fn();
+      state.activePromise = { onFailure: onFailureSpy };
+
+      client.emit('disconnected');
+      client.emit('connected');
+      await vi.advanceTimersByTimeAsync(3000);
+
+      expect(onFailureSpy).not.toHaveBeenCalled();
+      expect(state.lostCount).toBe(0);
 
       pool.stop();
     });
