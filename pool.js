@@ -380,6 +380,12 @@ export class ComfyServerPool extends EventEmitter {
 
   async sweepOrphanedPrompts(serverUrl) {
     try {
+      const state = this.serverStates.get(serverUrl);
+      // If server currently has an active job, do not sweep/interrupt running prompts
+      if (state && state.activeJob) {
+        return;
+      }
+
       const res = await fetch(`${serverUrl}/queue`);
       if (!res.ok) return;
 
@@ -406,9 +412,9 @@ export class ComfyServerPool extends EventEmitter {
       }
 
       const trackedPromptIds = new Set(this.getTrackedPromptIds());
-      for (const state of this.serverStates.values()) {
-        if (state.activeJob && state.activeJob.promptId) {
-          trackedPromptIds.add(state.activeJob.promptId);
+      for (const st of this.serverStates.values()) {
+        if (st.activeJob && st.activeJob.promptId) {
+          trackedPromptIds.add(st.activeJob.promptId);
         }
       }
 
@@ -436,7 +442,7 @@ export class ComfyServerPool extends EventEmitter {
     if (!this.servers || this.servers.length === 0) return;
     for (const url of this.servers) {
       const state = this.serverStates.get(url);
-      if (state && state.status === 'connected' && state.activeJob && state.activeJob.promptId) {
+      if (state && state.activeJob && state.activeJob.promptId) {
         // Stagnation timeout check: interrupt frozen jobs with no progress
         if (this.jobInactivityTimeoutMs > 0 && state.lastActivityTime) {
           if (Date.now() - state.lastActivityTime > this.jobInactivityTimeoutMs) {
@@ -461,28 +467,45 @@ export class ComfyServerPool extends EventEmitter {
   }
 
   async checkPromptStatus(comfyUrl, promptId) {
+    const isPromptInQueueList = (list, pid) => {
+      if (!Array.isArray(list)) return false;
+      return list.some(item => {
+        if (!item) return false;
+        if (typeof item === 'string') return item === pid;
+        if (Array.isArray(item)) {
+          return item.some(elem => elem === pid || elem?.prompt_id === pid || elem?.id === pid);
+        }
+        if (typeof item === 'object') {
+          return item.prompt_id === pid || item.id === pid || item[1] === pid || item[0] === pid;
+        }
+        return false;
+      });
+    };
+
+    let queueChecked = false;
     try {
       const res = await fetch(`${comfyUrl}/queue`, { signal: AbortSignal.timeout(5000) });
+      queueChecked = true;
       if (res.ok) {
         const q = await res.json();
         const running = q.queue_running || [];
         const pending = q.queue_pending || [];
-        const inQueue = running.some(p => p[0] === promptId || p[1] === promptId || p.prompt_id === promptId || (Array.isArray(p) && p[1] === promptId)) ||
-          pending.some(p => p[0] === promptId || p[1] === promptId || p.prompt_id === promptId || (Array.isArray(p) && p[1] === promptId));
-        if (inQueue) {
+        if (isPromptInQueueList(running, promptId) || isPromptInQueueList(pending, promptId)) {
           return 'running';
         }
       }
     } catch (err) {}
 
+    let historyChecked = false;
     try {
       const res = await fetch(`${comfyUrl}/history/${promptId}`, { signal: AbortSignal.timeout(5000) });
+      historyChecked = true;
       if (res.ok) {
         const hist = await res.json();
-        let promptHistory = hist[promptId];
+        let promptHistory = hist ? hist[promptId] : null;
 
         // Fallback: if single item endpoint didn't contain promptId, fetch recent history list
-        if (!promptHistory && typeof hist === 'object' && !hist[promptId]) {
+        if (!promptHistory && typeof hist === 'object' && hist) {
           try {
             const fullHistRes = await fetch(`${comfyUrl}/history?max_items=100`, { signal: AbortSignal.timeout(5000) });
             if (fullHistRes.ok) {
@@ -505,6 +528,11 @@ export class ComfyServerPool extends EventEmitter {
       }
     } catch (err) {}
 
+    // If HTTP calls failed/timed out due to network latency or GPU load, status is unknown
+    if (!queueChecked || !historyChecked) {
+      return 'unknown';
+    }
+
     return 'lost';
   }
 
@@ -520,9 +548,9 @@ export class ComfyServerPool extends EventEmitter {
     const isTest = process.env.NODE_ENV === 'test' || process.env.VITEST;
     const retryDelayMs = isTest ? 0 : 2000;
 
-    while (status === 'lost' && (state.lostCount || 0) < maxRetries) {
+    while ((status === 'lost' || status === 'unknown') && (state.lostCount || 0) < maxRetries) {
       state.lostCount = (state.lostCount || 0) + 1;
-      console.log(`[QueuePool] Job promptId ${promptId} returned 'lost' (attempt ${state.lostCount}/${maxRetries}) on ${serverUrl}. Waiting before declaring loss...`);
+      console.log(`[QueuePool] Job promptId ${promptId} returned '${status}' (attempt ${state.lostCount}/${maxRetries}) on ${serverUrl}. Retrying status check...`);
       if (state.lostCount < maxRetries) {
         if (retryDelayMs > 0) {
           await new Promise(r => setTimeout(r, retryDelayMs));
@@ -531,7 +559,7 @@ export class ComfyServerPool extends EventEmitter {
       }
     }
 
-    console.log(`[QueuePool] Active job status on ComfyUI ${serverUrl}: ${status}`);
+    console.log(`[QueuePool] Verified active job status on ComfyUI ${serverUrl}: ${status}`);
 
     if (state.activePromise) {
       if (status === 'completed') {
@@ -554,9 +582,10 @@ export class ComfyServerPool extends EventEmitter {
           }
         } catch (err) {}
         state.activePromise.onFailure(new Error(errorMsg));
-      } else if (status === 'running') {
+      } else if (status === 'running' || status === 'unknown') {
         state.lostCount = 0;
       } else if (status === 'lost') {
+        state.lostCount = 0;
         state.activePromise.onFailure(new Error('ComfyUI job lost on reconnect/crash'));
       }
     }
