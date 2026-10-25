@@ -1303,6 +1303,8 @@ describe('ComfyServerPool', () => {
       });
       vi.stubGlobal('fetch', mockFetch);
 
+      pool.interrupt = vi.fn().mockResolvedValue(true);
+
       const dispatchPromise = pool.dispatch('http://gpu1:8188', {
         id: 'job-adopt-lost',
         promptId: 'prompt-lost-789',
@@ -1316,6 +1318,8 @@ describe('ComfyServerPool', () => {
       const assertionPromise = expect(dispatchPromise).rejects.toThrow('ComfyUI job lost on reconnect/crash');
       await vi.advanceTimersByTimeAsync(1);
       await assertionPromise;
+
+      expect(pool.interrupt).toHaveBeenCalledWith('http://gpu1:8188');
 
       pool.stop();
     });

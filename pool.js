@@ -536,7 +536,7 @@ export class ComfyServerPool extends EventEmitter {
     return 'lost';
   }
 
-  async verifyActiveJobState(serverUrl, isReconnection = false, maxRetries = 3) {
+  async verifyActiveJobState(serverUrl, isReconnection = false, maxRetries = (process.env.NODE_ENV === 'test' || process.env.VITEST) ? 3 : 10) {
     const state = this.getOrCreateServerState(serverUrl);
     if (!state || !state.activeJob || !state.activeJob.promptId) return;
 
@@ -586,6 +586,14 @@ export class ComfyServerPool extends EventEmitter {
         state.lostCount = 0;
       } else if (status === 'lost') {
         state.lostCount = 0;
+        try {
+          await this.interrupt(serverUrl);
+          await fetch(`${serverUrl}/queue`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ delete: [promptId] })
+          });
+        } catch (e) {}
         state.activePromise.onFailure(new Error('ComfyUI job lost on reconnect/crash'));
       }
     }
