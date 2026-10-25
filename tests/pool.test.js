@@ -1124,4 +1124,230 @@ describe('ComfyServerPool', () => {
       pool.stop();
     });
   });
+
+  describe('In-Flight Job Adoption on Server Reconnect / Restart', () => {
+    it('should adopt an already-queued job when promptId is provided and resolve when ComfyUI reports completed', async () => {
+      const { pool } = createTestPool({
+        servers: ['http://gpu1:8188']
+      });
+      pool.getClient('http://gpu1:8188');
+      await vi.advanceTimersByTimeAsync(1);
+
+      pool.uploadImage = vi.fn();
+      pool.queuePrompt = vi.fn();
+      pool.prepareWorkflow = vi.fn().mockReturnValue({
+        workflow: {},
+        videoOutputNodeId: 'node_out',
+        imageOutputNodeId: null,
+        promptOutputNodeId: 'node_prompt'
+      });
+      pool.getPromptHistory = vi.fn().mockResolvedValue({
+        outputs: {
+          node_out: { gifs: [{ filename: 'test.mp4', subfolder: '', type: 'output' }] },
+          node_prompt: { text: ['Resolved prompt text'] }
+        }
+      });
+      pool.downloadFile = vi.fn().mockResolvedValue(true);
+
+      const mockFetch = vi.fn().mockImplementation((url) => {
+        const urlStr = String(url);
+        if (urlStr.includes('/queue')) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ queue_running: [], queue_pending: [] })
+          });
+        }
+        if (urlStr.includes('/history/prompt-adopt-123')) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({
+              'prompt-adopt-123': {
+                status: { status_str: 'success' },
+                outputs: {
+                  node_out: { gifs: [{ filename: 'test.mp4', subfolder: '', type: 'output' }] }
+                }
+              }
+            })
+          });
+        }
+        return Promise.resolve({ ok: true });
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      const dispatchPromise = pool.dispatch('http://gpu1:8188', {
+        id: 'job-adopt-completed',
+        promptId: 'prompt-adopt-123',
+        jobType: 'video',
+        prompt: 'test prompt',
+        seed: 12345,
+        workflowTemplate: {},
+        outputDestPath: path.join(tempDir, 'adopted.mp4')
+      });
+
+      await vi.advanceTimersByTimeAsync(1);
+      const result = await dispatchPromise;
+
+      expect(pool.uploadImage).not.toHaveBeenCalled();
+      expect(pool.queuePrompt).not.toHaveBeenCalled();
+      expect(pool.downloadFile).toHaveBeenCalledWith(
+        'http://gpu1:8188',
+        'test.mp4',
+        '',
+        'output',
+        path.join(tempDir, 'adopted.mp4')
+      );
+      expect(result.promptId).toBe('prompt-adopt-123');
+      expect(result.resolvedPrompt).toBe('Resolved prompt text');
+
+      pool.stop();
+    });
+
+    it('should adopt an already-queued job that is running and resolve when WS emits execution_success', async () => {
+      const { pool } = createTestPool({
+        servers: ['http://gpu1:8188']
+      });
+      const client = pool.getClient('http://gpu1:8188');
+      await vi.advanceTimersByTimeAsync(1);
+
+      pool.uploadImage = vi.fn();
+      pool.queuePrompt = vi.fn();
+      pool.prepareWorkflow = vi.fn().mockReturnValue({
+        workflow: {},
+        videoOutputNodeId: 'node_out',
+        imageOutputNodeId: null,
+        promptOutputNodeId: null
+      });
+      pool.getPromptHistory = vi.fn().mockResolvedValue({
+        outputs: {
+          node_out: { gifs: [{ filename: 'running.mp4', subfolder: '', type: 'output' }] }
+        }
+      });
+      pool.downloadFile = vi.fn().mockResolvedValue(true);
+
+      const mockFetch = vi.fn().mockImplementation((url) => {
+        const urlStr = String(url);
+        if (urlStr.includes('/queue')) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ queue_running: [['prompt-running-456', 'prompt-running-456']] })
+          });
+        }
+        return Promise.resolve({ ok: true });
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      const progressEvents = [];
+      pool.on('progress', (e) => progressEvents.push(e));
+
+      const dispatchPromise = pool.dispatch('http://gpu1:8188', {
+        id: 'job-adopt-running',
+        promptId: 'prompt-running-456',
+        jobType: 'video',
+        prompt: 'test prompt',
+        seed: 12345,
+        workflowTemplate: {},
+        outputDestPath: path.join(tempDir, 'running.mp4')
+      });
+
+      await vi.advanceTimersByTimeAsync(1);
+
+      // ComfyUI sends progress while running
+      client.emit('progress', 10, 20, 'sampler_node', 'prompt-running-456');
+      expect(progressEvents.length).toBe(1);
+      expect(progressEvents[0].jobId).toBe('job-adopt-running');
+
+      // ComfyUI completes execution
+      client.emit('execution_success', 'prompt-running-456');
+      await vi.advanceTimersByTimeAsync(1);
+
+      const result = await dispatchPromise;
+      expect(pool.uploadImage).not.toHaveBeenCalled();
+      expect(pool.queuePrompt).not.toHaveBeenCalled();
+      expect(pool.downloadFile).toHaveBeenCalled();
+      expect(result.promptId).toBe('prompt-running-456');
+
+      pool.stop();
+    });
+
+    it('should reject adopted job when ComfyUI reports lost', async () => {
+      const { pool } = createTestPool({
+        servers: ['http://gpu1:8188']
+      });
+      pool.getClient('http://gpu1:8188');
+      await vi.advanceTimersByTimeAsync(1);
+
+      pool.uploadImage = vi.fn();
+      pool.queuePrompt = vi.fn();
+      pool.prepareWorkflow = vi.fn().mockReturnValue({
+        workflow: {},
+        videoOutputNodeId: 'node_out',
+        imageOutputNodeId: null,
+        promptOutputNodeId: null
+      });
+
+      const mockFetch = vi.fn().mockImplementation((url) => {
+        const urlStr = String(url);
+        if (urlStr.includes('/queue')) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ queue_running: [], queue_pending: [] })
+          });
+        }
+        if (urlStr.includes('/history')) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({})
+          });
+        }
+        return Promise.resolve({ ok: true });
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      const dispatchPromise = pool.dispatch('http://gpu1:8188', {
+        id: 'job-adopt-lost',
+        promptId: 'prompt-lost-789',
+        jobType: 'video',
+        prompt: 'test prompt',
+        seed: 12345,
+        workflowTemplate: {},
+        outputDestPath: path.join(tempDir, 'lost.mp4')
+      });
+
+      const assertionPromise = expect(dispatchPromise).rejects.toThrow('ComfyUI job lost on reconnect/crash');
+      await vi.advanceTimersByTimeAsync(1);
+      await assertionPromise;
+
+      pool.stop();
+    });
+
+    it('should not sweep running prompt when getTrackedPromptIds contains the promptId', async () => {
+      const trackedIds = new Set(['prompt-in-flight-999']);
+      const { pool } = createTestPool({
+        servers: ['http://gpu1:8188'],
+        getTrackedPromptIds: () => trackedIds
+      });
+      pool.interrupt = vi.fn();
+
+      const mockFetch = vi.fn().mockImplementation((url) => {
+        const urlStr = String(url);
+        if (urlStr.includes('/queue')) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({
+              queue_running: [['prompt-in-flight-999', 'prompt-in-flight-999']],
+              queue_pending: []
+            })
+          });
+        }
+        return Promise.resolve({ ok: true });
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      await pool.sweepOrphanedPrompts('http://gpu1:8188');
+
+      expect(pool.interrupt).not.toHaveBeenCalled();
+
+      pool.stop();
+    });
+  });
 });

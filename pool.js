@@ -763,7 +763,7 @@ export class ComfyServerPool extends EventEmitter {
       try {
         let localInputImageName = '';
 
-        if (job.inputImage) {
+        if (!job.promptId && job.inputImage) {
           checkAborted();
           localInputImageName = await this.uploadImage(
             serverUrl,
@@ -783,27 +783,34 @@ export class ComfyServerPool extends EventEmitter {
 
         checkAborted();
 
-        // Register temporary WS listeners before queueing to avoid missing immediate events
+        // Register temporary WS listeners before queueing or adopting to avoid missing immediate events
         wsClient.on('progress', onProgress);
         wsClient.on('executing', onExecuting);
         wsClient.on('execution_error', onError);
         wsClient.on('execution_success', onSuccess);
 
-        promptId = await this.queuePrompt(serverUrl, workflow, wsClient.clientId);
-        job.promptId = promptId;
-        state.lastActivityTime = Date.now();
-        this.emit('queued', { serverUrl, jobId: job.id, promptId });
+        if (job.promptId) {
+          promptId = job.promptId;
+          state.lastActivityTime = Date.now();
+          console.log(`[QueuePool] Adopting existing in-flight job ${job.id} (promptId: ${promptId}) on ${serverUrl}`);
+          await this.verifyActiveJobState(serverUrl);
+        } else {
+          promptId = await this.queuePrompt(serverUrl, workflow, wsClient.clientId);
+          job.promptId = promptId;
+          state.lastActivityTime = Date.now();
+          this.emit('queued', { serverUrl, jobId: job.id, promptId });
 
-        // Flush any events buffered before promptId was returned
-        for (const ev of pendingEvents) {
-          if (ev.pid === promptId) {
-            if (ev.type === 'progress') onProgress(ev.val, ev.max, ev.node, ev.pid);
-            else if (ev.type === 'executing') onExecuting(ev.node, ev.pid);
-            else if (ev.type === 'error') onError(ev.pid, ev.exception);
-            else if (ev.type === 'success') onSuccess(ev.pid);
+          // Flush any events buffered before promptId was returned
+          for (const ev of pendingEvents) {
+            if (ev.pid === promptId) {
+              if (ev.type === 'progress') onProgress(ev.val, ev.max, ev.node, ev.pid);
+              else if (ev.type === 'executing') onExecuting(ev.node, ev.pid);
+              else if (ev.type === 'error') onError(ev.pid, ev.exception);
+              else if (ev.type === 'success') onSuccess(ev.pid);
+            }
           }
+          pendingEvents = [];
         }
-        pendingEvents = [];
 
       } catch (err) {
         cleanup();
