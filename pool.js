@@ -536,7 +536,7 @@ export class ComfyServerPool extends EventEmitter {
     return 'lost';
   }
 
-  async verifyActiveJobState(serverUrl, isReconnection = false, maxRetries = (process.env.NODE_ENV === 'test' || process.env.VITEST) ? 3 : 10) {
+  async verifyActiveJobState(serverUrl, isReconnection = false, maxRetries = 3) {
     const state = this.getOrCreateServerState(serverUrl);
     if (!state || !state.activeJob || !state.activeJob.promptId) return;
 
@@ -546,7 +546,7 @@ export class ComfyServerPool extends EventEmitter {
     let status = await this.checkPromptStatus(serverUrl, promptId);
 
     const isTest = process.env.NODE_ENV === 'test' || process.env.VITEST;
-    const retryDelayMs = isTest ? 0 : 2000;
+    const retryDelayMs = isTest ? 0 : 1000;
 
     while ((status === 'lost' || status === 'unknown') && (state.lostCount || 0) < maxRetries) {
       state.lostCount = (state.lostCount || 0) + 1;
