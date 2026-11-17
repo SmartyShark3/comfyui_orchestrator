@@ -1,7 +1,7 @@
 /**
  * Modifies workflow JSON in place with prompt, seed, and input image.
  */
-export function prepareWorkflowJson(workflowJson, promptText, seed, imageName, negativePromptSuffix) {
+export function prepareWorkflowJson(workflowJson, promptText, seed, imageName, negativePromptSuffix, extraInputImages = {}) {
   const workflow = JSON.parse(JSON.stringify(workflowJson)); // clone
   let foundInputImage = false;
   let foundPrompt = false;
@@ -10,6 +10,7 @@ export function prepareWorkflowJson(workflowJson, promptText, seed, imageName, n
   let videoOutputNodeId = null;
   let imageOutputNodeId = null;
   let promptOutputNodeId = null;
+  const unusedExtraImageNodeIds = new Set();
 
   for (const nodeId in workflow) {
     const node = workflow[nodeId];
@@ -25,6 +26,21 @@ export function prepareWorkflowJson(workflowJson, promptText, seed, imageName, n
           node.inputs.image = imageName;
         }
         foundInputImage = true;
+      }
+    } else if (title && /^APP_INPUT_IMAGE_\d+$/.test(title)) {
+      const extraName = extraInputImages && typeof extraInputImages === 'object' ? extraInputImages[title] : null;
+      if (typeof extraName === 'string' && extraName.trim()) {
+        if (node.inputs) {
+          if ('image' in node.inputs) {
+            node.inputs.image = extraName;
+          } else if ('value' in node.inputs) {
+            node.inputs.value = extraName;
+          } else {
+            node.inputs.image = extraName;
+          }
+        }
+      } else {
+        unusedExtraImageNodeIds.add(nodeId);
       }
     } else if (title === 'APP_PROMPT') {
       if (node.inputs) {
@@ -86,6 +102,22 @@ export function prepareWorkflowJson(workflowJson, promptText, seed, imageName, n
       imageOutputNodeId = nodeId;
     } else if (title === 'APP_PROMPT_OUTPUT') {
       promptOutputNodeId = nodeId;
+    }
+  }
+
+  if (unusedExtraImageNodeIds.size > 0) {
+    for (const nodeId in workflow) {
+      if (unusedExtraImageNodeIds.has(nodeId)) continue;
+      const inputs = workflow[nodeId]?.inputs;
+      if (!inputs) continue;
+      for (const [key, val] of Object.entries(inputs)) {
+        if (Array.isArray(val) && val.length >= 1 && unusedExtraImageNodeIds.has(String(val[0]))) {
+          delete inputs[key];
+        }
+      }
+    }
+    for (const unusedId of unusedExtraImageNodeIds) {
+      delete workflow[unusedId];
     }
   }
 

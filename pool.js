@@ -155,8 +155,8 @@ export class ComfyServerPool extends EventEmitter {
   }
 
   // Overridable API methods
-  prepareWorkflow(workflowTemplate, prompt, seed, inputImageName, negativePrompt) {
-    return prepareWorkflowJson(workflowTemplate, prompt, seed, inputImageName, negativePrompt);
+  prepareWorkflow(workflowTemplate, prompt, seed, inputImageName, negativePrompt, extraInputImages) {
+    return prepareWorkflowJson(workflowTemplate, prompt, seed, inputImageName, negativePrompt, extraInputImages);
   }
 
   async uploadImage(serverUrl, fileBuffer, filename) {
@@ -770,6 +770,7 @@ export class ComfyServerPool extends EventEmitter {
 
       try {
         let localInputImageName = '';
+        const localExtraInputImages = {};
 
         if (!job.promptId && job.inputImage) {
           checkAborted();
@@ -780,6 +781,17 @@ export class ComfyServerPool extends EventEmitter {
           );
         }
 
+        if (!job.promptId && job.extraInputImages && typeof job.extraInputImages === 'object') {
+          for (const [key, img] of Object.entries(job.extraInputImages)) {
+            if (typeof img === 'string' && img.trim()) {
+              localExtraInputImages[key] = img;
+            } else if (img && img.buffer && img.filename) {
+              checkAborted();
+              localExtraInputImages[key] = await this.uploadImage(serverUrl, img.buffer, img.filename);
+            }
+          }
+        }
+
         checkAborted();
         let workflow;
         ({
@@ -787,7 +799,7 @@ export class ComfyServerPool extends EventEmitter {
           videoOutputNodeId,
           imageOutputNodeId,
           promptOutputNodeId
-        } = this.prepareWorkflow(job.workflowTemplate, job.prompt, job.seed, localInputImageName, job.negativePrompt));
+        } = this.prepareWorkflow(job.workflowTemplate, job.prompt, job.seed, localInputImageName, job.negativePrompt, localExtraInputImages));
 
         checkAborted();
 
