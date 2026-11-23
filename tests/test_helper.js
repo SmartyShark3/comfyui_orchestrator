@@ -53,8 +53,8 @@ export function createTestPool(options = {}, mockOverrides = {}) {
   };
 
   class TestComfyServerPool extends ComfyServerPool {
-    prepareWorkflow(workflowTemplate, prompt, seed, inputImageName, negativePrompt) {
-      return TestComfyServerPool.mocks.prepareWorkflow(workflowTemplate, prompt, seed, inputImageName, negativePrompt);
+    prepareWorkflow(workflowTemplate, prompt, seed, inputImageName, negativePrompt, extraInputImages) {
+      return TestComfyServerPool.mocks.prepareWorkflow(workflowTemplate, prompt, seed, inputImageName, negativePrompt, extraInputImages);
     }
 
     async uploadImage(serverUrl, fileBuffer, filename) {

@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { ComfyServerPool } from '../pool.js';
+import { uploadImageToComfy, getImageMimeType } from '../client.js';
 import { createTestPool, MockWebSocket } from './test_helper.js';
 
 // Mock the 'ws' module using the MockWebSocket class
@@ -1352,6 +1353,79 @@ describe('ComfyServerPool', () => {
       expect(pool.interrupt).not.toHaveBeenCalled();
 
       pool.stop();
+    });
+  });
+
+  describe('Extra Input Images (ref2va) & Image MIME Types', () => {
+    it('uploads { buffer, filename } extraInputImages and forwards string filenames to prepareWorkflow', async () => {
+      const { pool, mocks } = createTestPool({ servers: ['http://gpu1:8188'] });
+      const client = pool.getClient('http://gpu1:8188');
+      await vi.advanceTimersByTimeAsync(1);
+
+      mocks.uploadImage.mockImplementation(async (_url, _buf, fname) => `comfy_${fname}`);
+
+      const primaryBuf = Buffer.from('primary');
+      const ref1Buf = Buffer.from('ref1');
+      const dispatchPromise = pool.dispatch('http://gpu1:8188', {
+        id: 'job-extra-imgs',
+        jobType: 'video',
+        prompt: 'walk forward',
+        seed: 42,
+        workflowTemplate: {},
+        inputImage: { filename: 'start.png', buffer: primaryBuf },
+        extraInputImages: {
+          APP_INPUT_IMAGE_1: { filename: 'char.jpg', buffer: ref1Buf },
+          APP_INPUT_IMAGE_2: 'already_uploaded.webp'
+        },
+        outputDestPath: path.join(tempDir, 'out.mp4')
+      });
+
+      await vi.advanceTimersByTimeAsync(1);
+      client.emit('execution_success', 'prompt-test-123');
+      await vi.advanceTimersByTimeAsync(1);
+
+      const res = await dispatchPromise;
+      expect(res.promptId).toBe('prompt-test-123');
+
+      // Primary image + APP_INPUT_IMAGE_1 uploaded; APP_INPUT_IMAGE_2 string passed through without re-upload
+      expect(mocks.uploadImage).toHaveBeenCalledTimes(2);
+      expect(mocks.uploadImage).toHaveBeenNthCalledWith(1, 'http://gpu1:8188', primaryBuf, 'start.png');
+      expect(mocks.uploadImage).toHaveBeenNthCalledWith(2, 'http://gpu1:8188', ref1Buf, 'char.jpg');
+
+      expect(mocks.prepareWorkflow).toHaveBeenCalledWith(
+        {},
+        'walk forward',
+        42,
+        'comfy_start.png',
+        undefined,
+        {
+          APP_INPUT_IMAGE_1: 'comfy_char.jpg',
+          APP_INPUT_IMAGE_2: 'already_uploaded.webp'
+        }
+      );
+
+      pool.stop();
+    });
+
+    it('sets Content-Type based on image extension in uploadImageToComfy', async () => {
+      expect(getImageMimeType('a.png')).toBe('image/png');
+      expect(getImageMimeType('b.jpg')).toBe('image/jpeg');
+      expect(getImageMimeType('c.JPEG')).toBe('image/jpeg');
+      expect(getImageMimeType('d.webp')).toBe('image/webp');
+      expect(getImageMimeType('unknown')).toBe('image/png');
+
+      const seenBodies = [];
+      const mockFetch = vi.fn().mockImplementation(async (_url, opts) => {
+        seenBodies.push(opts.body.toString('utf8'));
+        return { ok: true, json: async () => ({ name: 'uploaded' }) };
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      await uploadImageToComfy('http://gpu1:8188', Buffer.from('jpgdata'), 'ref.jpg');
+      await uploadImageToComfy('http://gpu1:8188', Buffer.from('webpdata'), 'ref.webp');
+
+      expect(seenBodies[0]).toContain('Content-Type: image/jpeg');
+      expect(seenBodies[1]).toContain('Content-Type: image/webp');
     });
   });
 });

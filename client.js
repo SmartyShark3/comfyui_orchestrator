@@ -4,17 +4,40 @@ import path from 'path';
 import { EventEmitter } from 'events';
 
 /**
+ * Infer HTTP MIME type for an uploaded image filename.
+ *
+ * @param {string} filename
+ * @returns {string}
+ */
+export function getImageMimeType(filename) {
+  const ext = path.extname(String(filename || '')).toLowerCase();
+  switch (ext) {
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg';
+    case '.webp':
+      return 'image/webp';
+    case '.gif':
+      return 'image/gif';
+    case '.png':
+    default:
+      return 'image/png';
+  }
+}
+
+/**
  * Helper to upload an image to ComfyUI.
  */
 export async function uploadImageToComfy(comfyUrl, fileBuffer, filename) {
   const uploadUrl = `${comfyUrl}/upload/image`;
+  const mimeType = getImageMimeType(filename);
   
   // Construct multipart/form-data request manually to avoid external dependency issues
   const boundary = `----WebKitFormBoundary${Math.random().toString(36).substring(2)}`;
   const header = 
     `--${boundary}\r\n` +
     `Content-Disposition: form-data; name="image"; filename="${filename}"\r\n` +
-    `Content-Type: image/png\r\n\r\n`;
+    `Content-Type: ${mimeType}\r\n\r\n`;
   const footer = `\r\n--${boundary}--\r\n`;
 
   const body = Buffer.concat([
