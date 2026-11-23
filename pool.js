@@ -25,7 +25,7 @@ export function normalizeServerEntry(entry) {
   return null;
 }
 
-export function isWorkflowSupported(serverEntryOrUrl, workflowIdentifier, imageWorkflows = []) {
+export function isWorkflowSupported(serverEntryOrUrl, workflowIdentifier, workflows = []) {
   let supported = [];
   if (typeof serverEntryOrUrl === 'string') {
     supported = [];
@@ -47,16 +47,16 @@ export function isWorkflowSupported(serverEntryOrUrl, workflowIdentifier, imageW
     return true;
   }
 
-  // Cross-reference with imageWorkflows display name / file
-  if (Array.isArray(imageWorkflows)) {
-    for (const iw of imageWorkflows) {
-      if (iw.file && iw.file.toLowerCase() === target) {
-        if (iw.name && supported.some(w => String(w).toLowerCase() === iw.name.toLowerCase())) {
+  // Cross-reference with configured workflows display name / file
+  if (Array.isArray(workflows)) {
+    for (const wf of workflows) {
+      if (wf.file && wf.file.toLowerCase() === target) {
+        if (wf.name && supported.some(w => String(w).toLowerCase() === wf.name.toLowerCase())) {
           return true;
         }
       }
-      if (iw.name && iw.name.toLowerCase() === target) {
-        if (iw.file && supported.some(w => String(w).toLowerCase() === iw.file.toLowerCase())) {
+      if (wf.name && wf.name.toLowerCase() === target) {
+        if (wf.file && supported.some(w => String(w).toLowerCase() === wf.file.toLowerCase())) {
           return true;
         }
       }
@@ -109,10 +109,10 @@ export class ComfyServerPool extends EventEmitter {
     return Boolean(state && state.status === 'connected' && !state.activeJob);
   }
 
-  isWorkflowSupported(serverUrl, workflowIdentifier, imageWorkflows = []) {
+  isWorkflowSupported(serverUrl, workflowIdentifier, workflows = []) {
     const entry = this.serverEntries.get(serverUrl);
     if (!entry) return true;
-    return isWorkflowSupported(entry, workflowIdentifier, imageWorkflows);
+    return isWorkflowSupported(entry, workflowIdentifier, workflows);
   }
 
   getServerState(serverUrl) {
