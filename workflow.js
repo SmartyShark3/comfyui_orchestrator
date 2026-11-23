@@ -16,7 +16,7 @@ export function prepareWorkflowJson(workflowJson, promptText, seed, imageName, n
     const node = workflow[nodeId];
     const title = node._meta?.title;
 
-    if (title === 'APP_INPUT_IMAGE') {
+    if (title === 'APP_INPUT_IMAGE' || title === 'APP_INPUT_IMAGE_1') {
       if (node.inputs) {
         if ('image' in node.inputs) {
           node.inputs.image = imageName;
@@ -27,7 +27,7 @@ export function prepareWorkflowJson(workflowJson, promptText, seed, imageName, n
         }
         foundInputImage = true;
       }
-    } else if (title && /^APP_INPUT_IMAGE_\d+$/.test(title)) {
+    } else if (title && /^APP_INPUT_IMAGE_([2-9]|\d{2,})$/.test(title)) {
       const extraName = extraInputImages && typeof extraInputImages === 'object' ? extraInputImages[title] : null;
       if (typeof extraName === 'string' && extraName.trim()) {
         if (node.inputs) {

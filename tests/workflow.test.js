@@ -244,11 +244,11 @@ describe('Workflow JSON preparation', () => {
     expect(workflow["10"].inputs.text).toBe("suffix_neg");
   });
 
-  it('should prune unused APP_INPUT_IMAGE_N nodes and their downstream links', () => {
+  it('should treat APP_INPUT_IMAGE_1 as primary input and prune unused APP_INPUT_IMAGE_2..N nodes and their downstream links', () => {
     const mockWorkflow = {
-      "1": { "inputs": { "image": "placeholder.png" }, "_meta": { "title": "APP_INPUT_IMAGE" } },
-      "2": { "inputs": { "image": "example.png" }, "_meta": { "title": "APP_INPUT_IMAGE_1" } },
-      "3": { "inputs": { "image": "example.png" }, "_meta": { "title": "APP_INPUT_IMAGE_2" } },
+      "1": { "inputs": { "image": "placeholder.png" }, "_meta": { "title": "APP_INPUT_IMAGE_1" } },
+      "2": { "inputs": { "image": "example.png" }, "_meta": { "title": "APP_INPUT_IMAGE_2" } },
+      "3": { "inputs": { "image": "example.png" }, "_meta": { "title": "APP_INPUT_IMAGE_3" } },
       "4": {
         "inputs": {
           "ref_images.ref_image_0": ["1", 0],
@@ -259,7 +259,8 @@ describe('Workflow JSON preparation', () => {
       }
     };
 
-    const { workflow } = prepareWorkflowJson(mockWorkflow, "p", 1, "main.png", "");
+    const { workflow, foundInputImage } = prepareWorkflowJson(mockWorkflow, "p", 1, "main.png", "");
+    expect(foundInputImage).toBe(true);
     expect(workflow["1"].inputs.image).toBe("main.png");
     expect(workflow["2"]).toBeUndefined();
     expect(workflow["3"]).toBeUndefined();
@@ -269,11 +270,11 @@ describe('Workflow JSON preparation', () => {
     expect(mockWorkflow["2"]).toBeDefined();
   });
 
-  it('should populate provided APP_INPUT_IMAGE_N nodes while pruning omitted ones', () => {
+  it('should populate provided APP_INPUT_IMAGE_2..N nodes while pruning omitted ones', () => {
     const mockWorkflow = {
-      "1": { "inputs": { "image": "placeholder.png" }, "_meta": { "title": "APP_INPUT_IMAGE" } },
-      "2": { "inputs": { "image": "example.png" }, "_meta": { "title": "APP_INPUT_IMAGE_1" } },
-      "3": { "inputs": { "image": "example.png" }, "_meta": { "title": "APP_INPUT_IMAGE_2" } },
+      "1": { "inputs": { "image": "placeholder.png" }, "_meta": { "title": "APP_INPUT_IMAGE_1" } },
+      "2": { "inputs": { "image": "example.png" }, "_meta": { "title": "APP_INPUT_IMAGE_2" } },
+      "3": { "inputs": { "image": "example.png" }, "_meta": { "title": "APP_INPUT_IMAGE_3" } },
       "4": {
         "inputs": {
           "ref_images.ref_image_0": ["1", 0],
@@ -285,9 +286,10 @@ describe('Workflow JSON preparation', () => {
     };
 
     const { workflow } = prepareWorkflowJson(mockWorkflow, "p", 1, "main.png", "", {
-      APP_INPUT_IMAGE_1: "ref1.png"
+      APP_INPUT_IMAGE_2: "ref2.png"
     });
-    expect(workflow["2"].inputs.image).toBe("ref1.png");
+    expect(workflow["1"].inputs.image).toBe("main.png");
+    expect(workflow["2"].inputs.image).toBe("ref2.png");
     expect(workflow["3"]).toBeUndefined();
     expect(workflow["4"].inputs["ref_images.ref_image_1"]).toEqual(["2", 0]);
     expect(workflow["4"].inputs["ref_images.ref_image_2"]).toBeUndefined();
